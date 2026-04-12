@@ -1,0 +1,100 @@
+class_name DeterministicPathfinder
+extends RefCounted
+
+## Deterministic 4-neighbor BFS.
+## Neighbor order is fixed: right, left, down, up.
+
+const INVALID_CELL: Vector2i = Vector2i(-1, -1)
+const NEIGHBOR_OFFSETS: Array[Vector2i] = [
+	Vector2i(1, 0),
+	Vector2i(-1, 0),
+	Vector2i(0, 1),
+	Vector2i(0, -1),
+]
+
+
+static func find_path(game_state: GameState, start_cell: Vector2i, target_cell: Vector2i) -> Array[Vector2i]:
+	if start_cell == target_cell:
+		return []
+
+	if not game_state.is_cell_walkable(target_cell):
+		return []
+
+	var queue: Array[Vector2i] = []
+	queue.append(start_cell)
+	var queue_index: int = 0
+	var visited: Dictionary = {game_state.cell_key(start_cell): true}
+	var parents: Dictionary = {}
+
+	while queue_index < queue.size():
+		var current_cell_value: Variant = queue[queue_index]
+		queue_index += 1
+		if not (current_cell_value is Vector2i):
+			continue
+		var current_cell: Vector2i = current_cell_value
+
+		for offset in NEIGHBOR_OFFSETS:
+			var neighbor: Vector2i = current_cell + offset
+			if not game_state.is_cell_walkable(neighbor):
+				continue
+
+			var neighbor_key: String = game_state.cell_key(neighbor)
+			if visited.has(neighbor_key):
+				continue
+
+			visited[neighbor_key] = true
+			parents[neighbor_key] = current_cell
+
+			if neighbor == target_cell:
+				return _reconstruct_path(game_state, parents, start_cell, target_cell)
+
+			queue.append(neighbor)
+
+	return []
+
+
+static func _reconstruct_path(
+	game_state: GameState,
+	parents: Dictionary,
+	start_cell: Vector2i,
+	target_cell: Vector2i
+) -> Array[Vector2i]:
+	var reversed_path: Array[Vector2i] = []
+	var current_cell: Vector2i = target_cell
+
+	while current_cell != start_cell:
+		reversed_path.append(current_cell)
+		var parent_cell_value: Variant = parents[game_state.cell_key(current_cell)]
+		if not (parent_cell_value is Vector2i):
+			return []
+		var parent_cell: Vector2i = parent_cell_value
+		current_cell = parent_cell
+
+	reversed_path.reverse()
+	return reversed_path
+
+
+static func find_path_to_adjacent_target(
+	game_state: GameState,
+	start_cell: Vector2i,
+	target_cell: Vector2i
+) -> Array[Vector2i]:
+	var adjacent_cells: Array[Vector2i] = game_state.get_adjacent_walkable_cells(target_cell)
+	var best_path: Array[Vector2i] = []
+	var best_path_found: bool = false
+
+	for adjacent_cell in adjacent_cells:
+		var candidate_path: Array[Vector2i] = find_path(game_state, start_cell, adjacent_cell)
+		var candidate_is_valid: bool = adjacent_cell == start_cell or not candidate_path.is_empty()
+		if not candidate_is_valid:
+			continue
+
+		if not best_path_found:
+			best_path = candidate_path
+			best_path_found = true
+			continue
+
+		if candidate_path.size() < best_path.size():
+			best_path = candidate_path
+
+	return best_path

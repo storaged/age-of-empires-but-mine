@@ -1,0 +1,80 @@
+[gd_scene load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scenes/prototype_gameplay.gd" id="1"]
+[ext_resource type="Script" path="res://rendering/renderer.gd" id="2"]
+
+[node name="PrototypeGameplay" type="Node2D"]
+script = ExtResource("1")
+
+[node name="GameRenderer" type="Node2D" parent="."]
+script = ExtResource("2")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+position_smoothing_enabled = false
+enabled = true
+
+[node name="CanvasLayer" type="CanvasLayer" parent="."]
+
+[node name="SummaryMargin" type="MarginContainer" parent="CanvasLayer"]
+anchors_preset = 1
+anchor_right = 0.0
+anchor_bottom = 0.0
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 336.0
+offset_bottom = 212.0
+grow_horizontal = 0
+grow_vertical = 0
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 8
+mouse_filter = 2
+
+[node name="SummaryPanel" type="PanelContainer" parent="CanvasLayer/SummaryMargin"]
+layout_mode = 2
+custom_minimum_size = Vector2(296, 172)
+mouse_filter = 2
+
+[node name="StatusLabel" type="RichTextLabel" parent="CanvasLayer/SummaryMargin/SummaryPanel"]
+layout_mode = 2
+custom_minimum_size = Vector2(272, 148)
+bbcode_enabled = false
+scroll_active = true
+selection_enabled = true
+autowrap_mode = 3
+mouse_filter = 2
+
+[node name="DebugMargin" type="MarginContainer" parent="CanvasLayer"]
+visible = false
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 0.0
+offset_left = -340.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = 190.0
+grow_horizontal = 0
+grow_vertical = 0
+theme_override_constants/margin_left = 8
+theme_override_constants/margin_top = 8
+theme_override_constants/margin_right = 8
+theme_override_constants/margin_bottom = 8
+mouse_filter = 2
+
+[node name="DebugPanel" type="PanelContainer" parent="CanvasLayer/DebugMargin"]
+layout_mode = 2
+custom_minimum_size = Vector2(300, 150)
+mouse_filter = 2
+
+[node name="DebugLabel" type="RichTextLabel" parent="CanvasLayer/DebugMargin/DebugPanel"]
+visible = false
+layout_mode = 2
+custom_minimum_size = Vector2(276, 126)
+bbcode_enabled = false
+scroll_active = true
+selection_enabled = true
+autowrap_mode = 3
+mouse_filter = 2
