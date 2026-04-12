@@ -13,7 +13,15 @@ const NEIGHBOR_OFFSETS: Array[Vector2i] = [
 ]
 
 
-static func find_path(game_state: GameState, start_cell: Vector2i, target_cell: Vector2i) -> Array[Vector2i]:
+## Finds a path from start_cell to target_cell using BFS.
+## If avoid_occupied is true, treats cells currently occupied by other units as impassable,
+## except for the target cell itself. Falls back cleanly to empty array if unreachable.
+static func find_path(
+	game_state: GameState,
+	start_cell: Vector2i,
+	target_cell: Vector2i,
+	avoid_occupied: bool = false
+) -> Array[Vector2i]:
 	if start_cell == target_cell:
 		return []
 
@@ -36,6 +44,8 @@ static func find_path(game_state: GameState, start_cell: Vector2i, target_cell: 
 		for offset in NEIGHBOR_OFFSETS:
 			var neighbor: Vector2i = current_cell + offset
 			if not game_state.is_cell_walkable(neighbor):
+				continue
+			if avoid_occupied and neighbor != target_cell and game_state.is_cell_occupied_by_unit(neighbor):
 				continue
 
 			var neighbor_key: String = game_state.cell_key(neighbor)

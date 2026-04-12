@@ -4,6 +4,8 @@ extends RefCounted
 ## Authoritative simulation data only.
 ## No camera, selection, hover, node refs, or presentation state here.
 
+const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
+
 var current_tick: int = 0
 var next_entity_id: int = 1
 var deterministic_seed: int = 1337
@@ -359,6 +361,19 @@ func has_static_blocker_at_cell(cell: Vector2i) -> bool:
 	return false
 
 
+func get_active_builder_id_for_structure(structure_id: int) -> int:
+	for entity_id in get_entities_by_type("unit"):
+		var entity: Dictionary = get_entity_dict(entity_id)
+		if get_entity_unit_role(entity) != "worker":
+			continue
+		if get_entity_int(entity, "assigned_construction_site_id", 0) != structure_id:
+			continue
+		var task: String = get_entity_task_state(entity)
+		if task == "to_construction" or task == "constructing":
+			return entity_id
+	return 0
+
+
 func get_selectable_entity_id_at_cell(cell: Vector2i) -> int:
 	for entity_id in get_entities_by_type("stockpile"):
 		var stockpile_entity: Dictionary = get_entity_dict(entity_id)
@@ -381,28 +396,105 @@ func can_place_structure_at(cell: Vector2i) -> bool:
 	return true
 
 
+func get_entity_hp(entity: Dictionary) -> int:
+	return get_entity_int(entity, "hp", 0)
+
+
+func get_entity_max_hp(entity: Dictionary) -> int:
+	return get_entity_int(entity, "max_hp", 0)
+
+
+func get_entity_attack_target_id(entity: Dictionary) -> int:
+	return get_entity_int(entity, "attack_target_id", 0)
+
+
+func get_entity_attack_cooldown_remaining(entity: Dictionary) -> int:
+	return get_entity_int(entity, "attack_cooldown_remaining", 0)
+
+
 func get_structure_cost(structure_type: String) -> int:
-	if structure_type == "house":
-		return 30
-	return 0
+	return GameDefinitionsClass.get_building_cost(structure_type)
 
 
 func get_structure_construction_duration(structure_type: String) -> int:
-	if structure_type == "house":
-		return 24
-	return 0
+	return GameDefinitionsClass.get_building_construction_duration(structure_type)
 
 
 func get_production_cost(unit_type: String) -> int:
-	if unit_type == "worker":
-		return 20
-	return 0
+	return GameDefinitionsClass.get_unit_production_cost(unit_type)
 
 
 func get_production_duration(unit_type: String) -> int:
-	if unit_type == "worker":
-		return 18
-	return 0
+	return GameDefinitionsClass.get_unit_production_duration(unit_type)
+
+
+## Returns true if the player has enough of every resource required to place this building.
+func can_afford_building(structure_type: String) -> bool:
+	var costs: Dictionary = GameDefinitionsClass.get_building_costs(structure_type)
+	for resource_type in costs.keys():
+		var cost_value: Variant = costs[resource_type]
+		var cost: int = cost_value if cost_value is int else 0
+		if get_resource_amount(resource_type) < cost:
+			return false
+	return true
+
+
+## Deducts all resource costs for placing a building. Call only after can_afford_building() is true.
+func deduct_building_cost(structure_type: String) -> void:
+	var costs: Dictionary = GameDefinitionsClass.get_building_costs(structure_type)
+	for resource_type in costs.keys():
+		var cost_value: Variant = costs[resource_type]
+		var cost: int = cost_value if cost_value is int else 0
+		if cost > 0:
+			resources[resource_type] = get_resource_amount(resource_type) - cost
+
+
+## Refunds all resource costs for a building (used when placement validation fails post-deduction).
+func refund_building_cost(structure_type: String) -> void:
+	var costs: Dictionary = GameDefinitionsClass.get_building_costs(structure_type)
+	for resource_type in costs.keys():
+		var cost_value: Variant = costs[resource_type]
+		var cost: int = cost_value if cost_value is int else 0
+		if cost > 0:
+			resources[resource_type] = get_resource_amount(resource_type) + cost
+
+
+## Returns true if the prerequisite building for this structure type is already completed.
+func is_prerequisite_met(structure_type: String) -> bool:
+	var required_type: String = GameDefinitionsClass.get_building_prerequisite(structure_type)
+	if required_type == "":
+		return true
+	for entity_id in get_entities_by_type("structure"):
+		var entity: Dictionary = get_entity_dict(entity_id)
+		if get_entity_structure_type(entity) == required_type and get_entity_is_constructed(entity):
+			return true
+	return false
+
+
+## Returns true if the player can afford all production costs for this unit type.
+func can_afford_production(unit_type: String) -> bool:
+	var costs: Dictionary = GameDefinitionsClass.get_unit_production_costs(unit_type)
+	for resource_type in costs.keys():
+		var cost_value: Variant = costs[resource_type]
+		var cost: int = cost_value if cost_value is int else 0
+		if get_resource_amount(resource_type) < cost:
+			return false
+	return true
+
+
+## Deducts all resource costs for producing a unit. Call only after can_afford_production() is true.
+func deduct_production_cost(unit_type: String) -> void:
+	var costs: Dictionary = GameDefinitionsClass.get_unit_production_costs(unit_type)
+	for resource_type in costs.keys():
+		var cost_value: Variant = costs[resource_type]
+		var cost: int = cost_value if cost_value is int else 0
+		if cost > 0:
+			resources[resource_type] = get_resource_amount(resource_type) - cost
+
+
+## Returns true if this entity has the fields needed to participate in combat as an attacker.
+func get_entity_can_attack(entity: Dictionary) -> bool:
+	return entity.has("attack_target_id")
 
 
 func get_spawn_cells_around(cell: Vector2i) -> Array[Vector2i]:

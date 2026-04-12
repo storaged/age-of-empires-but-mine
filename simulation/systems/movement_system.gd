@@ -12,6 +12,8 @@ const TRAFFIC_PRIORITY_BY_TASK: Dictionary = {
 	"to_stockpile": 1,
 	"gathering": 2,
 	"to_resource": 3,
+	"to_construction": 3,
+	"to_target": 3,
 	"idle": 4,
 }
 
@@ -97,6 +99,8 @@ func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], 
 		var wait_reason: String = _build_wait_reason(game_state, intent, start_occupancy)
 		var waiting_entity: Dictionary = game_state.get_entity_dict(entity_id)
 		waiting_entity["traffic_state"] = wait_reason
+		if wait_reason == "waiting":
+			_maybe_clear_path_for_idle_blocker(game_state, intent, start_occupancy, waiting_entity)
 		game_state.entities[entity_id] = waiting_entity
 
 	game_state.occupancy = reserved_cells
@@ -170,6 +174,30 @@ func _apply_step(game_state: GameState, entity_id: int, next_cell: Vector2i, tra
 	if path_cells.is_empty():
 		entity["move_target"] = next_cell
 	game_state.entities[entity_id] = entity
+
+
+## If the cell blocking this unit is occupied by an idle unit (no move target),
+## clear the waiting unit's path so the economy/combat system re-plans next tick
+## with avoid_occupied=true, finding an alternative route if one exists.
+func _maybe_clear_path_for_idle_blocker(
+	game_state: GameState,
+	intent: Dictionary,
+	start_occupancy: Dictionary,
+	waiting_entity: Dictionary
+) -> void:
+	var next_cell: Vector2i = _get_intent_cell(intent, "next_cell")
+	var next_key: String = game_state.cell_key(next_cell)
+	if not start_occupancy.has(next_key):
+		return
+	var blocker_value: Variant = start_occupancy[next_key]
+	if not (blocker_value is int):
+		return
+	var blocker_entity: Dictionary = game_state.get_entity_dict(blocker_value)
+	if game_state.get_entity_has_move_target(blocker_entity):
+		return
+	# Blocker is genuinely idle — clear path to force re-plan next tick.
+	waiting_entity["path_cells"] = []
+	waiting_entity["has_move_target"] = false
 
 
 func _build_wait_reason(game_state: GameState, intent: Dictionary, start_occupancy: Dictionary) -> String:

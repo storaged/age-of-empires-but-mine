@@ -1,7 +1,9 @@
 extends Node2D
 
+const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const GameStateClass = preload("res://simulation/game_state.gd")
 const BuildCommandSystemClass = preload("res://simulation/systems/build_command_system.gd")
+const CombatSystemClass = preload("res://simulation/systems/combat_system.gd")
 const GatherCommandSystemClass = preload("res://simulation/systems/gather_command_system.gd")
 const MoveCommandSystemClass = preload("res://simulation/systems/move_command_system.gd")
 const MovementSystemClass = preload("res://simulation/systems/movement_system.gd")
@@ -13,6 +15,8 @@ const StateHasherClass = preload("res://runtime/state_hasher.gd")
 const TickManagerClass = preload("res://runtime/tick_manager.gd")
 const ClientStateClass = preload("res://client/client_state.gd")
 const InputHandlerClass = preload("res://client/input_handler.gd")
+const CommandPanelClass = preload("res://client/command_panel.gd")
+const QueueProductionCommandClass = preload("res://commands/queue_production_command.gd")
 
 const MAP_WIDTH: int = 20
 const MAP_HEIGHT: int = 14
@@ -35,9 +39,12 @@ var state_hasher: StateHasher
 var tick_manager: TickManager
 var client_state: ClientState
 var input_handler: InputHandler
+var command_panel: Control
 var show_debug_overlay: bool = false
 
 func _ready() -> void:
+	status_label.bbcode_enabled = true
+	debug_label.bbcode_enabled = true
 	game_state = _create_initial_game_state()
 	command_buffer = CommandBufferClass.new()
 	replay_log = ReplayLogClass.new()
@@ -48,6 +55,7 @@ func _ready() -> void:
 	systems.append(BuildCommandSystemClass.new())
 	systems.append(MoveCommandSystemClass.new())
 	systems.append(GatherCommandSystemClass.new())
+	systems.append(CombatSystemClass.new())
 	systems.append(MovementSystemClass.new())
 	systems.append(WorkerEconomySystemClass.new())
 	systems.append(ProductionSystemClass.new())
@@ -59,6 +67,13 @@ func _ready() -> void:
 		systems
 	)
 
+	command_panel = CommandPanelClass.new()
+	$CanvasLayer.add_child(command_panel)
+	command_panel.build_requested.connect(_on_build_requested)
+	command_panel.train_requested.connect(_on_train_requested)
+	command_panel.debug_toggle_requested.connect(_on_debug_toggle_requested)
+	command_panel.cancel_placement_requested.connect(_on_cancel_placement_requested)
+
 	client_state.set_camera_world_position(_map_center_world_position())
 	_apply_camera_to_node()
 	_sync_client_visuals_from_authoritative_state()
@@ -66,6 +81,7 @@ func _ready() -> void:
 	renderer.configure(game_state, client_state, CELL_SIZE)
 	renderer.queue_redraw()
 	_refresh_status_label()
+	command_panel.refresh(game_state, client_state)
 
 func _process(delta: float) -> void:
 	_update_camera_from_input(delta)
@@ -83,6 +99,7 @@ func _process(delta: float) -> void:
 	client_state.update_visual_interpolation(tick_manager.get_tick_progress())
 	_apply_camera_to_node()
 	_refresh_status_label()
+	command_panel.refresh(game_state, client_state)
 	renderer.queue_redraw()
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -115,6 +132,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			)
 
 		_refresh_status_label()
+		command_panel.refresh(game_state, client_state)
 		renderer.queue_redraw()
 		return
 
@@ -148,22 +166,24 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		var key_event: InputEventKey = event
 		if key_event.keycode == KEY_F3:
-			show_debug_overlay = not show_debug_overlay
-			_refresh_status_label()
+			_on_debug_toggle_requested()
 		elif key_event.keycode == KEY_B:
 			if client_state.is_in_structure_placement_mode():
-				client_state.cancel_structure_placement()
-				client_state.set_order_feedback("Build mode cancelled.", false)
+				_on_cancel_placement_requested()
 			else:
-				client_state.begin_structure_placement("house")
-				client_state.set_order_feedback("Build mode: right-click to place a house.", false)
-			_refresh_status_label()
-			renderer.queue_redraw()
+				_on_build_requested("house")
+		elif key_event.keycode == KEY_N:
+			if client_state.is_in_structure_placement_mode():
+				_on_cancel_placement_requested()
+			else:
+				_on_build_requested("barracks")
+		elif key_event.keycode == KEY_M:
+			if client_state.is_in_structure_placement_mode():
+				_on_cancel_placement_requested()
+			else:
+				_on_build_requested("archery_range")
 		elif key_event.keycode == KEY_ESCAPE and client_state.is_in_structure_placement_mode():
-			client_state.cancel_structure_placement()
-			client_state.set_order_feedback("Build mode cancelled.", false)
-			_refresh_status_label()
-			renderer.queue_redraw()
+			_on_cancel_placement_requested()
 		elif key_event.keycode == KEY_Q:
 			var production_commands: Array[SimulationCommand] = input_handler.build_production_commands_for_selection(
 				game_state,
@@ -173,12 +193,14 @@ func _unhandled_input(event: InputEvent) -> void:
 			for command in production_commands:
 				tick_manager.queue_command(command)
 			_refresh_status_label()
+			command_panel.refresh(game_state, client_state)
 			renderer.queue_redraw()
 
 func _create_initial_game_state() -> GameState:
 	var state: GameState = GameStateClass.new()
 	state.resources = {
 		"wood": 0,
+		"stone": 0,
 	}
 	state.map_data = {
 		"width": MAP_WIDTH,
@@ -201,11 +223,11 @@ func _create_initial_game_state() -> GameState:
 		"production_blocked": false,
 	}
 
-	var resource_cells: Array[Vector2i] = [
+	var wood_cells: Array[Vector2i] = [
 		Vector2i(15, 4),
 		Vector2i(15, 5),
 	]
-	for resource_cell in resource_cells:
+	for resource_cell in wood_cells:
 		var resource_node_id: int = state.allocate_entity_id()
 		state.entities[resource_node_id] = {
 			"id": resource_node_id,
@@ -214,6 +236,61 @@ func _create_initial_game_state() -> GameState:
 			"grid_position": resource_cell,
 			"remaining_amount": 80,
 		}
+
+	var stone_cells: Array[Vector2i] = [
+		Vector2i(5, 11),
+		Vector2i(6, 11),
+	]
+	for stone_cell in stone_cells:
+		var stone_node_id: int = state.allocate_entity_id()
+		state.entities[stone_node_id] = {
+			"id": stone_node_id,
+			"entity_type": "resource_node",
+			"resource_type": "stone",
+			"grid_position": stone_cell,
+			"remaining_amount": 60,
+		}
+
+	var enemy_base_cell: Vector2i = Vector2i(17, 8)
+	var enemy_base_id: int = state.allocate_entity_id()
+	state.entities[enemy_base_id] = {
+		"id": enemy_base_id,
+		"entity_type": "structure",
+		"structure_type": "enemy_base",
+		"owner_id": 2,
+		"grid_position": enemy_base_cell,
+		"is_constructed": true,
+		"construction_progress_ticks": 0,
+		"construction_duration_ticks": 0,
+		"assigned_builder_id": 0,
+		"hp": 50,
+		"max_hp": 50,
+		"production_queue_count": 0,
+		"production_progress_ticks": 0,
+		"production_duration_ticks": 0,
+		"produced_unit_type": "",
+		"production_blocked": false,
+	}
+
+	var enemy_unit_cells: Array[Vector2i] = [Vector2i(15, 8), Vector2i(16, 10)]
+	for enemy_cell in enemy_unit_cells:
+		var enemy_id: int = state.allocate_entity_id()
+		state.entities[enemy_id] = {
+			"id": enemy_id,
+			"entity_type": "unit",
+			"unit_role": "enemy_dummy",
+			"owner_id": 2,
+			"grid_position": enemy_cell,
+			"move_target": enemy_cell,
+			"path_cells": [],
+			"has_move_target": false,
+			"worker_task_state": "idle",
+			"interaction_slot_cell": Vector2i(-1, -1),
+			"traffic_state": "",
+			"hp": 20,
+			"max_hp": 20,
+		}
+		state.occupancy["%d,%d" % [enemy_cell.x, enemy_cell.y]] = enemy_id
 
 	var starting_cells: Array[Vector2i] = [
 		Vector2i(3, 3),
@@ -309,6 +386,22 @@ func _cell_center_world(cell: Vector2i) -> Vector2:
 	)
 
 func _refresh_status_label() -> void:
+	var lines: Array[String] = []
+
+	lines.append("[b]Wood:[/b] %d  [b]Stone:[/b] %d" % [
+		game_state.get_resource_amount("wood"),
+		game_state.get_resource_amount("stone"),
+	])
+
+	var feedback: String = client_state.last_order_feedback
+	if feedback != "":
+		if client_state.last_order_was_rejected:
+			lines.append("[color=tomato][b]! %s[/b][/color]" % feedback)
+		else:
+			lines.append("[color=lightgreen]%s[/color]" % feedback)
+
+	status_label.text = "\n".join(lines)
+
 	var unit_descriptions: Array[String] = []
 	var entity_ids: Array = game_state.entities.keys()
 	entity_ids.sort()
@@ -317,75 +410,38 @@ func _refresh_status_label() -> void:
 		if game_state.get_entity_type(entity) != "unit":
 			continue
 		unit_descriptions.append(
-			"%d:%s %s traffic=%s carry=%d" % [
+			"#%d %s/%s carry=%d" % [
 				entity_id,
-				game_state.get_entity_unit_role(entity),
 				game_state.get_entity_task_state(entity),
-				game_state.get_entity_string(entity, "traffic_state", ""),
+				game_state.get_entity_string(entity, "traffic_state", "-"),
 				game_state.get_entity_carried_amount(entity),
 			]
 		)
 
 	var queued_records: Array[Dictionary] = command_buffer.get_debug_records()
-	var selected_summary: String = _build_selected_summary()
-	var summary_lines: Array[String] = [
-		"RTS Economy + Construction Prototype",
-		"",
-		"Controls:",
-		"  Left click: single select",
-		"  Left drag: marquee select",
-		"  Right click ground: move",
-		"  Right click resource: gather",
-		"  Right click stockpile: deposit cargo",
-		"  B: house build mode",
-		"  Q: produce worker from selected base",
-		"  WASD: move camera",
-		"  Mouse wheel: zoom",
-		"  F3: toggle debug",
-		"",
-		"Resources: wood=%d" % game_state.get_resource_amount("wood"),
-		"Runtime: tick=%d progress=%.2f" % [
-			game_state.current_tick,
-			tick_manager.get_tick_progress(),
-		],
-		"Selected count: %d" % client_state.selected_entity_ids.size(),
-		"Selection: %s" % str(client_state.selected_entity_ids),
-		"Hover: cell=%s unit=%d" % [
-			str(client_state.hover_cell),
-			client_state.hovered_entity_id,
-		],
-		"Order: %s" % client_state.last_order_feedback,
-		"Build mode: %s" % _build_mode_summary(),
-		"Selected: %s" % selected_summary,
-		"Units: %s" % ", ".join(unit_descriptions),
-	]
-	status_label.text = "\n".join(summary_lines)
-
 	var debug_lines: Array[String] = [
-		"Debug",
+		"[b]Debug[/b]",
+		"tick=%d  hash=%s" % [
+			game_state.current_tick,
+			_last_authoritative_state_hash().left(8),
+		],
+		"hover=%s  entity=%d" % [str(client_state.hover_cell), client_state.hovered_entity_id],
+		"selection=%s" % str(client_state.selected_entity_ids),
+		"queued=%s" % JSON.stringify(queued_records),
 		"",
-		"hash=%s" % _last_authoritative_state_hash(),
-		"queued_commands=%s" % JSON.stringify(queued_records),
-		"rejected_order=%s" % str(client_state.last_order_was_rejected),
-		"blocked_hover=%s blocked_cells=%d" % [
-			str(game_state.is_cell_blocked(client_state.hover_cell)),
-			_get_blocked_cell_count(),
-		],
-		"drag_selecting=%s drag_rect=%s" % [
-			str(client_state.is_drag_selecting),
-			str(client_state.get_drag_world_rect()),
-		],
-		"selection=%s hover_cell=%s hover_unit=%d indicators=%s" % [
-			str(client_state.selected_entity_ids),
-			str(client_state.hover_cell),
-			client_state.hovered_entity_id,
-			str(client_state.indicators),
-		],
-		"wood=%d resource_nodes=%s" % [
-			game_state.get_resource_amount("wood"),
-			str(game_state.get_entities_by_type("resource_node")),
-		],
+		"[b]Units:[/b]",
 	]
+	for desc in unit_descriptions:
+		debug_lines.append("  %s" % desc)
+	debug_lines.append("")
+	debug_lines.append("[b]Controls:[/b]")
+	debug_lines.append("  LClick: select  Drag: multi-select")
+	debug_lines.append("  RClick ground: move  RClick wood: gather")
+	debug_lines.append("  RClick base: deposit  RClick enemy: attack")
+	debug_lines.append("  B/N/M: build house/barracks/archery range  Q: train  ESC: cancel")
+	debug_lines.append("  WASD: camera  Wheel: zoom  F3/DBG: debug toggle")
+
+	debug_label.bbcode_enabled = true
 	debug_label.text = "\n".join(debug_lines)
 	debug_label.visible = show_debug_overlay
 	$CanvasLayer/DebugMargin.visible = show_debug_overlay
@@ -399,9 +455,6 @@ func _last_authoritative_state_hash() -> String:
 
 	return hash_history[hash_history.size() - 1]
 
-
-func _get_entity_path_size(entity: Dictionary) -> int:
-	return game_state.get_entity_path_cells(entity).size()
 
 
 func _get_blocked_cell_count() -> int:
@@ -423,69 +476,62 @@ func _build_blocked_cells() -> Dictionary:
 		Vector2i(13, 9),
 		Vector2i(15, 4),
 		Vector2i(15, 5),
+		Vector2i(5, 11),
+		Vector2i(6, 11),
 	]
 	for cell in cells:
 		blocked_cells["%d,%d" % [cell.x, cell.y]] = true
 	return blocked_cells
 
 
-func _build_selected_summary() -> String:
-	if client_state.selected_entity_ids.is_empty():
-		return "none"
+func _on_build_requested(structure_type: String) -> void:
+	var display_name: String = GameDefinitionsClass.get_building_display_name(structure_type)
+	var costs_str: String = GameDefinitionsClass.format_costs(
+		GameDefinitionsClass.get_building_costs(structure_type)
+	)
+	client_state.begin_structure_placement(structure_type)
+	client_state.set_order_feedback(
+		"Placing %s (%s) — right-click to place." % [display_name, costs_str], false
+	)
+	_refresh_status_label()
+	command_panel.refresh(game_state, client_state)
+	renderer.queue_redraw()
 
-	if client_state.selected_entity_ids.size() > 1:
-		return "%d workers" % client_state.selected_entity_ids.size()
 
-	var selected_id_value: Variant = client_state.selected_entity_ids[0]
-	if not (selected_id_value is int):
-		return "invalid-selection"
-	var selected_id: int = selected_id_value
-	var entity: Dictionary = game_state.get_entity_dict(selected_id)
+func _on_train_requested(producer_id: int) -> void:
+	var entity: Dictionary = game_state.get_entity_dict(producer_id)
 	var entity_type: String = game_state.get_entity_type(entity)
-	if entity_type == "stockpile" or entity_type == "structure":
-		return _build_selected_structure_summary(selected_id, entity)
-	var interaction_slot: Vector2i = game_state.get_entity_interaction_slot_cell(entity)
-	return "%d role=%s task=%s traffic=%s carry=%d/%d target_resource=%d stockpile=%d slot=%s" % [
-		selected_id,
-		game_state.get_entity_unit_role(entity),
-		game_state.get_entity_task_state(entity),
-		game_state.get_entity_string(entity, "traffic_state", ""),
-		game_state.get_entity_carried_amount(entity),
-		game_state.get_entity_capacity(entity),
-		game_state.get_entity_assigned_resource_node_id(entity),
-		game_state.get_entity_assigned_stockpile_id(entity),
-		str(interaction_slot),
-	]
-
-
-func _build_selected_structure_summary(selected_id: int, entity: Dictionary) -> String:
-	var entity_type: String = game_state.get_entity_type(entity)
-	var queue_count: int = game_state.get_entity_production_queue_count(entity)
+	var unit_type: String = ""
 	if entity_type == "stockpile":
-		return "%d base queue=%d progress=%d/%d blocked=%s" % [
-			selected_id,
-			queue_count,
-			game_state.get_entity_production_progress_ticks(entity),
-			game_state.get_entity_production_duration_ticks(entity),
-			str(game_state.get_entity_is_production_blocked(entity)),
-		]
+		unit_type = GameDefinitionsClass.get_stockpile_produces()
+	elif entity_type == "structure":
+		unit_type = GameDefinitionsClass.get_building_produces(
+			game_state.get_entity_structure_type(entity)
+		)
+	if unit_type == "" or not game_state.can_afford_production(unit_type):
+		client_state.set_order_feedback("Not enough resources.", true)
+		_refresh_status_label()
+		return
+	var cmd := QueueProductionCommandClass.new(
+		game_state.current_tick + 1, 1, 0, producer_id, unit_type
+	)
+	tick_manager.queue_command(cmd)
+	client_state.set_order_feedback(
+		"Training %s." % GameDefinitionsClass.get_unit_display_name(unit_type), false
+	)
+	_refresh_status_label()
+	command_panel.refresh(game_state, client_state)
+	renderer.queue_redraw()
 
-	return "%d structure=%s built=%s construction=%d/%d builder=%d" % [
-		selected_id,
-		game_state.get_entity_structure_type(entity),
-		str(game_state.get_entity_is_constructed(entity)),
-		game_state.get_entity_construction_progress_ticks(entity),
-		game_state.get_entity_construction_duration_ticks(entity),
-		game_state.get_entity_int(entity, "assigned_builder_id", 0),
-	]
+
+func _on_debug_toggle_requested() -> void:
+	show_debug_overlay = not show_debug_overlay
+	_refresh_status_label()
 
 
-func _build_mode_summary() -> String:
-	if not client_state.is_in_structure_placement_mode():
-		return "off"
-	return "%s at %s valid=%s reason=%s" % [
-		client_state.placement_mode_structure_type,
-		str(client_state.placement_preview_cell),
-		str(client_state.placement_preview_valid),
-		client_state.placement_preview_reason,
-	]
+func _on_cancel_placement_requested() -> void:
+	client_state.cancel_structure_placement()
+	client_state.set_order_feedback("Build cancelled.", false)
+	_refresh_status_label()
+	command_panel.refresh(game_state, client_state)
+	renderer.queue_redraw()

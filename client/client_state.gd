@@ -118,6 +118,14 @@ func set_invalid_indicator(cell: Vector2i, message: String) -> void:
 	last_order_was_rejected = true
 
 
+func set_attack_indicator(cell: Vector2i) -> void:
+	indicators.clear()
+	indicators.append({
+		"type": "attack_target",
+		"cell": cell,
+	})
+
+
 func set_build_indicator(cell: Vector2i) -> void:
 	indicators.clear()
 	indicators.append({

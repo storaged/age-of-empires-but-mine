@@ -1,6 +1,8 @@
 class_name ProductionSystem
 extends SimulationSystem
 
+const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
+
 
 func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], _tick: int) -> void:
 	var producer_ids: Array[int] = []
@@ -67,31 +69,15 @@ func _spawn_unit(
 	spawn_cell: Vector2i,
 	producer_id: int
 ) -> void:
-	if produced_unit_type != "worker":
+	var owner_id: int = game_state.get_entity_owner_id(producer_entity, 1)
+	var unit_id: int = game_state.allocate_entity_id()
+
+	var entity: Dictionary = GameDefinitionsClass.create_unit_entity(
+		produced_unit_type, unit_id, owner_id, spawn_cell, producer_id
+	)
+	if entity.is_empty():
+		game_state.next_entity_id -= 1
 		return
 
-	var unit_id: int = game_state.allocate_entity_id()
-	game_state.entities[unit_id] = {
-		"id": unit_id,
-		"entity_type": "unit",
-		"unit_role": "worker",
-		"owner_id": game_state.get_entity_owner_id(producer_entity, 1),
-		"grid_position": spawn_cell,
-		"move_target": spawn_cell,
-		"path_cells": [],
-		"has_move_target": false,
-		"worker_task_state": "idle",
-		"assigned_resource_node_id": 0,
-		"assigned_stockpile_id": producer_id,
-		"assigned_construction_site_id": 0,
-		"carried_resource_type": "",
-		"carried_amount": 0,
-		"interaction_slot_cell": Vector2i(-1, -1),
-		"traffic_state": "",
-		"carry_capacity": 10,
-		"harvest_amount": 5,
-		"gather_duration_ticks": 8,
-		"deposit_duration_ticks": 2,
-		"gather_progress_ticks": 0,
-	}
+	game_state.entities[unit_id] = entity
 	game_state.occupancy[game_state.cell_key(spawn_cell)] = unit_id

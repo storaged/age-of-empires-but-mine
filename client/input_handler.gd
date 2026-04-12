@@ -1,7 +1,10 @@
 class_name InputHandler
 extends RefCounted
 
+const AssignConstructionCommandClass = preload("res://commands/assign_construction_command.gd")
+const AttackCommandClass = preload("res://commands/attack_command.gd")
 const DeterministicPathfinderClass = preload("res://simulation/deterministic_pathfinder.gd")
+const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const BuildStructureCommandClass = preload("res://commands/build_structure_command.gd")
 const GatherResourceCommandClass = preload("res://commands/gather_resource_command.gd")
 const MoveUnitCommandClass = preload("res://commands/move_unit_command.gd")
@@ -77,6 +80,26 @@ func build_commands_for_world_position(
 			scheduled_tick
 		)
 
+	var unfinished_structure_id: int = _find_unfinished_structure_id_at_cell(clamped_target_cell, game_state)
+	if unfinished_structure_id != 0:
+		return _build_assign_construction_commands(
+			unfinished_structure_id,
+			clamped_target_cell,
+			game_state,
+			client_state,
+			scheduled_tick
+		)
+
+	var enemy_id: int = _find_enemy_entity_id_at_cell(clamped_target_cell, game_state)
+	if enemy_id != 0:
+		return _build_attack_commands(
+			enemy_id,
+			clamped_target_cell,
+			game_state,
+			client_state,
+			scheduled_tick
+		)
+
 	if not game_state.is_cell_walkable(clamped_target_cell):
 		client_state.set_invalid_indicator(clamped_target_cell, "Blocked cell. Order rejected.")
 		return []
@@ -136,19 +159,38 @@ func build_production_commands_for_selection(
 	scheduled_tick: int
 ) -> Array[SimulationCommand]:
 	if client_state.selected_entity_ids.size() != 1:
-		client_state.set_order_feedback("Select one base to produce a worker.", true)
+		client_state.set_order_feedback("Select one producer to queue production.", true)
 		return []
 
 	var selected_id: int = client_state.selected_entity_ids[0]
 	var selected_entity: Dictionary = game_state.get_entity_dict(selected_id)
 	var entity_type: String = game_state.get_entity_type(selected_entity)
-	if entity_type != "stockpile":
-		client_state.set_order_feedback("Selected entity cannot produce workers.", true)
+
+	var produced_unit_type: String = ""
+	if entity_type == "stockpile":
+		produced_unit_type = GameDefinitionsClass.get_stockpile_produces()
+	elif entity_type == "structure":
+		if not game_state.get_entity_is_constructed(selected_entity):
+			client_state.set_order_feedback("Building not yet constructed.", true)
+			return []
+		var structure_type: String = game_state.get_entity_structure_type(selected_entity)
+		produced_unit_type = GameDefinitionsClass.get_building_produces(structure_type)
+		if produced_unit_type == "":
+			client_state.set_order_feedback("This building cannot produce units.", true)
+			return []
+	else:
+		client_state.set_order_feedback("Select a base or barracks to produce units.", true)
 		return []
 
-	var production_cost: int = game_state.get_production_cost("worker")
-	if game_state.get_resource_amount("wood") < production_cost:
-		client_state.set_order_feedback("Not enough wood to produce a worker.", true)
+	if not game_state.can_afford_production(produced_unit_type):
+		var costs_str: String = GameDefinitionsClass.format_costs(
+			GameDefinitionsClass.get_unit_production_costs(produced_unit_type)
+		)
+		var unit_name: String = GameDefinitionsClass.get_unit_display_name(produced_unit_type)
+		client_state.set_order_feedback(
+			"Not enough resources to produce a %s (%s)." % [unit_name.to_lower(), costs_str],
+			true
+		)
 		return []
 
 	var commands: Array[SimulationCommand] = []
@@ -158,10 +200,10 @@ func build_production_commands_for_selection(
 			issuer_id,
 			_next_sequence_number(),
 			selected_id,
-			"worker"
+			produced_unit_type
 		)
 	)
-	client_state.set_order_feedback("Worker production queued.", false)
+	client_state.set_order_feedback("%s production queued." % produced_unit_type.capitalize(), false)
 	return commands
 
 
@@ -206,6 +248,99 @@ func _build_gather_commands_for_resource_node(
 
 	client_state.set_gather_indicator(resource_cell)
 	client_state.set_order_feedback("Gather order accepted.", false)
+	return commands
+
+
+func _find_enemy_entity_id_at_cell(cell: Vector2i, game_state: GameState) -> int:
+	var cell_key_str: String = "%d,%d" % [cell.x, cell.y]
+	if game_state.occupancy.has(cell_key_str):
+		var occ: Variant = game_state.occupancy[cell_key_str]
+		if occ is int:
+			var unit_entity: Dictionary = game_state.get_entity_dict(occ)
+			if game_state.get_entity_owner_id(unit_entity) != issuer_id:
+				return occ
+	for entity_id in game_state.get_entities_by_type("structure"):
+		var structure_entity: Dictionary = game_state.get_entity_dict(entity_id)
+		if game_state.get_entity_grid_position(structure_entity) == cell:
+			if game_state.get_entity_owner_id(structure_entity) != issuer_id:
+				return entity_id
+	return 0
+
+
+func _build_attack_commands(
+	target_id: int,
+	target_cell: Vector2i,
+	game_state: GameState,
+	client_state: ClientState,
+	scheduled_tick: int
+) -> Array[SimulationCommand]:
+	var commands: Array[SimulationCommand] = []
+	var sorted_unit_ids: Array[int] = []
+	for unit_id in client_state.selected_entity_ids:
+		sorted_unit_ids.append(unit_id)
+	sorted_unit_ids.sort()
+
+	for unit_id in sorted_unit_ids:
+		var entity: Dictionary = game_state.get_entity_dict(unit_id)
+		if not game_state.get_entity_can_attack(entity):
+			continue
+		commands.append(
+			AttackCommandClass.new(
+				scheduled_tick, issuer_id, _next_sequence_number(),
+				unit_id, target_id
+			)
+		)
+
+	if commands.is_empty():
+		client_state.set_invalid_indicator(target_cell, "Select combat units to attack.")
+		return []
+
+	client_state.set_attack_indicator(target_cell)
+	client_state.set_order_feedback("Attack order accepted.", false)
+	return commands
+
+
+func _find_unfinished_structure_id_at_cell(cell: Vector2i, game_state: GameState) -> int:
+	for entity_id in game_state.get_entities_by_type("structure"):
+		var structure_entity: Dictionary = game_state.get_entity_dict(entity_id)
+		if game_state.get_entity_grid_position(structure_entity) == cell:
+			if not game_state.get_entity_is_constructed(structure_entity):
+				return entity_id
+	return 0
+
+
+func _build_assign_construction_commands(
+	structure_id: int,
+	structure_cell: Vector2i,
+	game_state: GameState,
+	client_state: ClientState,
+	scheduled_tick: int
+) -> Array[SimulationCommand]:
+	var commands: Array[SimulationCommand] = []
+	var sorted_unit_ids: Array[int] = []
+	for unit_id in client_state.selected_entity_ids:
+		sorted_unit_ids.append(unit_id)
+	sorted_unit_ids.sort()
+
+	for unit_id in sorted_unit_ids:
+		var worker_entity: Dictionary = game_state.get_entity_dict(unit_id)
+		if game_state.get_entity_type(worker_entity) != "unit":
+			continue
+		if game_state.get_entity_unit_role(worker_entity) != "worker":
+			continue
+		commands.append(
+			AssignConstructionCommandClass.new(
+				scheduled_tick, issuer_id, _next_sequence_number(),
+				unit_id, structure_id
+			)
+		)
+		break  # single-builder model
+
+	if commands.is_empty():
+		client_state.set_invalid_indicator(structure_cell, "Select a worker to resume construction.")
+		return []
+
+	client_state.set_order_feedback("Construction assigned.", false)
 	return commands
 
 
@@ -334,7 +469,10 @@ func _build_structure_commands_for_cell(
 		)
 	)
 	client_state.set_build_indicator(target_cell)
-	client_state.set_order_feedback("House build order accepted.", false)
+	var placed_display: String = GameDefinitionsClass.get_building_display_name(
+		client_state.placement_mode_structure_type
+	)
+	client_state.set_order_feedback("%s build order accepted." % placed_display, false)
 	client_state.cancel_structure_placement()
 	return commands
 
@@ -424,8 +562,9 @@ func _can_place_structure(
 		return false
 	if not game_state.can_place_structure_at(target_cell):
 		return false
-	var build_cost: int = game_state.get_structure_cost(client_state.placement_mode_structure_type)
-	if game_state.get_resource_amount("wood") < build_cost:
+	if not game_state.is_prerequisite_met(client_state.placement_mode_structure_type):
+		return false
+	if not game_state.can_afford_building(client_state.placement_mode_structure_type):
 		return false
 	if _find_primary_builder_id(game_state, client_state) == 0:
 		return false
@@ -438,13 +577,21 @@ func _build_placement_reason(
 	client_state: ClientState,
 	can_place: bool
 ) -> String:
+	var structure_type: String = client_state.placement_mode_structure_type
+	var display_name: String = GameDefinitionsClass.get_building_display_name(structure_type)
 	if can_place:
-		return "House placement valid."
+		return "%s placement valid." % display_name
 	if _find_primary_builder_id(game_state, client_state) == 0:
 		return "Select a worker to build."
-	var build_cost: int = game_state.get_structure_cost(client_state.placement_mode_structure_type)
-	if game_state.get_resource_amount("wood") < build_cost:
-		return "Not enough wood to place a house."
+	var prereq: String = GameDefinitionsClass.get_building_prerequisite(structure_type)
+	if prereq != "" and not game_state.is_prerequisite_met(structure_type):
+		var prereq_name: String = GameDefinitionsClass.get_building_display_name(prereq)
+		return "Requires a completed %s first." % prereq_name
+	if not game_state.can_afford_building(structure_type):
+		var costs_str: String = GameDefinitionsClass.format_costs(
+			GameDefinitionsClass.get_building_costs(structure_type)
+		)
+		return "Not enough resources (%s)." % costs_str
 	if game_state.is_cell_occupied_by_unit(target_cell):
 		return "Cannot place on a unit."
 	if game_state.has_static_blocker_at_cell(target_cell):

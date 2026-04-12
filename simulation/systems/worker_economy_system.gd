@@ -295,11 +295,7 @@ func _assign_path_to_slot(
 	if slot_cell == Vector2i(-1, -1):
 		_set_worker_idle(worker_entity)
 		return
-	var path_cells: Array[Vector2i] = DeterministicPathfinderClass.find_path(
-		game_state,
-		worker_cell,
-		slot_cell
-	)
+	var path_cells: Array[Vector2i] = _find_path_avoid_occupied(game_state, worker_cell, slot_cell)
 	if worker_cell != slot_cell and path_cells.is_empty():
 		_set_worker_idle(worker_entity)
 		return
@@ -308,6 +304,20 @@ func _assign_path_to_slot(
 	worker_entity["worker_task_state"] = task_state
 	worker_entity["move_target"] = slot_cell
 	worker_entity["interaction_slot_cell"] = slot_cell
+
+
+## Tries occupancy-aware pathfinding first; falls back to standard BFS if no unobstructed path.
+func _find_path_avoid_occupied(
+	game_state: GameState,
+	from_cell: Vector2i,
+	to_cell: Vector2i
+) -> Array[Vector2i]:
+	var path_cells: Array[Vector2i] = DeterministicPathfinderClass.find_path(
+		game_state, from_cell, to_cell, true
+	)
+	if not path_cells.is_empty() or from_cell == to_cell:
+		return path_cells
+	return DeterministicPathfinderClass.find_path(game_state, from_cell, to_cell, false)
 
 
 func _set_worker_idle(worker_entity: Dictionary) -> void:

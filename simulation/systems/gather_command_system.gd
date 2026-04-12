@@ -123,11 +123,7 @@ func _assign_path_to_resource(
 	if slot_cell == Vector2i(-1, -1):
 		_clear_worker_task(worker_entity, current_cell)
 		return
-	var path_cells: Array[Vector2i] = DeterministicPathfinderClass.find_path(
-		game_state,
-		current_cell,
-		slot_cell
-	)
+	var path_cells: Array[Vector2i] = _find_path_avoid_occupied(game_state, current_cell, slot_cell)
 	if current_cell != slot_cell and path_cells.is_empty():
 		_clear_worker_task(worker_entity, current_cell)
 		return
@@ -157,11 +153,7 @@ func _assign_path_to_stockpile(
 	if slot_cell == Vector2i(-1, -1):
 		_clear_worker_task(worker_entity, current_cell)
 		return
-	var path_cells: Array[Vector2i] = DeterministicPathfinderClass.find_path(
-		game_state,
-		current_cell,
-		slot_cell
-	)
+	var path_cells: Array[Vector2i] = _find_path_avoid_occupied(game_state, current_cell, slot_cell)
 	if current_cell != slot_cell and path_cells.is_empty():
 		_clear_worker_task(worker_entity, current_cell)
 		return
@@ -170,6 +162,20 @@ func _assign_path_to_stockpile(
 	worker_entity["worker_task_state"] = "to_stockpile"
 	worker_entity["move_target"] = slot_cell
 	worker_entity["interaction_slot_cell"] = slot_cell
+
+
+## Tries occupancy-aware pathfinding first; falls back to standard BFS if no unobstructed path.
+func _find_path_avoid_occupied(
+	game_state: GameState,
+	from_cell: Vector2i,
+	to_cell: Vector2i
+) -> Array[Vector2i]:
+	var path_cells: Array[Vector2i] = DeterministicPathfinderClass.find_path(
+		game_state, from_cell, to_cell, true
+	)
+	if not path_cells.is_empty() or from_cell == to_cell:
+		return path_cells
+	return DeterministicPathfinderClass.find_path(game_state, from_cell, to_cell, false)
 
 
 func _clear_worker_task(worker_entity: Dictionary, worker_cell: Vector2i) -> void:
