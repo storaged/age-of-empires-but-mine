@@ -175,10 +175,17 @@ func _apply_queue_production_command(game_state: GameState, command: SimulationC
 	var production_duration: int = game_state.get_production_duration(production_command.produced_unit_type)
 	if production_duration <= 0:
 		return
-	if not game_state.can_afford_production(production_command.produced_unit_type):
+	var producer_owner_id: int = game_state.get_entity_owner_id(producer_entity, 1)
+	if not game_state.can_queue_population_for_unit(
+		producer_owner_id,
+		production_command.produced_unit_type
+	):
+		return
+	if producer_owner_id == 1 and not game_state.can_afford_production(production_command.produced_unit_type):
 		return
 
-	game_state.deduct_production_cost(production_command.produced_unit_type)
+	if producer_owner_id == 1:
+		game_state.deduct_production_cost(production_command.produced_unit_type)
 	var queue_count: int = game_state.get_entity_production_queue_count(producer_entity) + 1
 	producer_entity["production_queue_count"] = queue_count
 	producer_entity["produced_unit_type"] = production_command.produced_unit_type

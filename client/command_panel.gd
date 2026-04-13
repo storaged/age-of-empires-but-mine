@@ -154,11 +154,19 @@ func _get_context_actions(game_state: GameState, client_state: ClientState) -> A
 			var display_name: String = GameDefinitionsClass.get_unit_display_name(produces)
 			var cost_str: String = GameDefinitionsClass.format_costs_short(costs)
 			var can_afford: bool = game_state.can_afford_production(produces)
+			var owner_id: int = game_state.get_entity_owner_id(entity, 1)
+			var has_population_room: bool = game_state.can_queue_population_for_unit(owner_id, produces)
+			var can_train: bool = can_afford and has_population_room
+			var disabled_reason: String = ""
+			if not can_afford:
+				disabled_reason = "Not enough resources"
+			elif not has_population_room:
+				disabled_reason = "Need more houses"
 			actions.append({
 				"label": "Train\n%s\n%s" % [display_name, cost_str],
 				"tooltip": "Train %s — %s" % [display_name, GameDefinitionsClass.format_costs(costs)],
-				"enabled": can_afford,
-				"disabled_reason": "" if can_afford else "Not enough resources",
+				"enabled": can_train,
+				"disabled_reason": disabled_reason,
 				"type": "train",
 				"producer_id": sel_id,
 			})
@@ -236,26 +244,48 @@ func _build_selected_summary(game_state: GameState, client_state: ClientState) -
 	var entity_type: String = game_state.get_entity_type(entity)
 
 	if entity_type == "stockpile":
+		var hp: int = game_state.get_entity_hp(entity)
+		var max_hp: int = game_state.get_entity_max_hp(entity)
+		var pop_used: int = game_state.get_population_used(game_state.get_entity_owner_id(entity, 1))
+		var pop_cap: int = game_state.get_population_cap(game_state.get_entity_owner_id(entity, 1))
 		var sp_unit: String = GameDefinitionsClass.get_stockpile_produces()
 		var sp_name: String = GameDefinitionsClass.get_unit_display_name(sp_unit).to_lower()
 		var queue_count: int = game_state.get_entity_production_queue_count(entity)
 		if queue_count > 0:
 			var progress: int = game_state.get_entity_production_progress_ticks(entity)
 			var duration: int = game_state.get_entity_production_duration_ticks(entity)
-			return "[b]Base:[/b] producing %s  %d/%d ticks" % [sp_name, progress, duration]
+			return "[b]Base:[/b] HP %d/%d  pop %d/%d  producing %s  %d/%d ticks" % [
+				hp,
+				max_hp,
+				pop_used,
+				pop_cap,
+				sp_name,
+				progress,
+				duration,
+			]
 		if game_state.get_entity_is_production_blocked(entity):
-			return "[color=tomato][b]Base:[/b] blocked — no spawn space[/color]"
-		return "[b]Base:[/b] idle"
+			return "[color=tomato][b]Base:[/b] HP %d/%d  pop %d/%d  blocked — no spawn space[/color]" % [
+				hp,
+				max_hp,
+				pop_used,
+				pop_cap,
+			]
+		return "[b]Base:[/b] HP %d/%d  pop %d/%d  idle" % [hp, max_hp, pop_used, pop_cap]
 
 	if entity_type == "structure":
 		var owner_id: int = game_state.get_entity_owner_id(entity)
+		var structure_type: String = game_state.get_entity_structure_type(entity)
+		var structure_label: String = structure_type
+		if GameDefinitionsClass.is_known_building_type(structure_type):
+			structure_label = GameDefinitionsClass.get_building_display_name(structure_type)
+		elif structure_type == "enemy_base":
+			structure_label = "Enemy base"
 		if owner_id != 1:
 			var hp: int = game_state.get_entity_hp(entity)
 			var max_hp: int = game_state.get_entity_max_hp(entity)
-			return "[color=tomato][b]Enemy base[/b][/color]  HP %d/%d" % [hp, max_hp]
+			return "[color=tomato][b]%s[/b][/color]  HP %d/%d" % [structure_label, hp, max_hp]
 		var constructed: bool = game_state.get_entity_is_constructed(entity)
-		var structure_type: String = game_state.get_entity_structure_type(entity)
-		var building_label: String = GameDefinitionsClass.get_building_display_name(structure_type)
+		var building_label: String = structure_label
 		if not constructed:
 			var progress: int = game_state.get_entity_construction_progress_ticks(entity)
 			var duration: int = game_state.get_entity_construction_duration_ticks(entity)
@@ -272,13 +302,26 @@ func _build_selected_summary(game_state: GameState, client_state: ClientState) -
 		if produces != "":
 			var produce_name: String = GameDefinitionsClass.get_unit_display_name(produces).to_lower()
 			var queue_count: int = game_state.get_entity_production_queue_count(entity)
+			var pop_used: int = game_state.get_population_used(game_state.get_entity_owner_id(entity, 1))
+			var pop_cap: int = game_state.get_population_cap(game_state.get_entity_owner_id(entity, 1))
 			if queue_count > 0:
 				var progress: int = game_state.get_entity_production_progress_ticks(entity)
 				var duration: int = game_state.get_entity_production_duration_ticks(entity)
-				return "[b]%s:[/b] training %s  %d/%d ticks" % [building_label, produce_name, progress, duration]
+				return "[b]%s:[/b] pop %d/%d  training %s  %d/%d ticks" % [
+					building_label,
+					pop_used,
+					pop_cap,
+					produce_name,
+					progress,
+					duration,
+				]
 			if game_state.get_entity_is_production_blocked(entity):
-				return "[color=tomato][b]%s:[/b] blocked — no spawn space[/color]" % building_label
-			return "[b]%s:[/b] built" % building_label
+				return "[color=tomato][b]%s:[/b] pop %d/%d  blocked — no spawn space[/color]" % [
+					building_label,
+					pop_used,
+					pop_cap,
+				]
+			return "[b]%s:[/b] pop %d/%d  built" % [building_label, pop_used, pop_cap]
 		return "[b]%s:[/b] built" % building_label
 
 	var unit_role: String = game_state.get_entity_unit_role(entity)

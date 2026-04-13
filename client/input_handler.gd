@@ -193,6 +193,11 @@ func build_production_commands_for_selection(
 		)
 		return []
 
+	var owner_id: int = game_state.get_entity_owner_id(selected_entity, issuer_id)
+	if game_state.is_population_capped_for_unit(owner_id, produced_unit_type):
+		client_state.set_order_feedback("Population cap reached. Need more houses.", true)
+		return []
+
 	var commands: Array[SimulationCommand] = []
 	commands.append(
 		QueueProductionCommandClass.new(

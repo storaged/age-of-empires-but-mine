@@ -14,6 +14,7 @@ const BUILDINGS: Dictionary = {
 		"display_name": "House",
 		"costs": {"wood": 30},
 		"construction_duration": 24,
+		"supply_provided": 5,
 		"requires_building": "",
 		"produces": "",
 		"render_base": "#a56b3a",
@@ -24,6 +25,7 @@ const BUILDINGS: Dictionary = {
 		"display_name": "Barracks",
 		"costs": {"wood": 40},
 		"construction_duration": 30,
+		"supply_provided": 0,
 		"requires_building": "house",
 		"produces": "soldier",
 		"render_base": "#4a4e69",
@@ -34,6 +36,7 @@ const BUILDINGS: Dictionary = {
 		"display_name": "Archery Range",
 		"costs": {"wood": 25, "stone": 20},
 		"construction_duration": 35,
+		"supply_provided": 0,
 		"requires_building": "barracks",
 		"produces": "archer",
 		"render_base": "#1a6b5a",
@@ -50,6 +53,7 @@ const UNITS: Dictionary = {
 		"display_name": "Worker",
 		"production_costs": {"wood": 20},
 		"production_duration": 18,
+		"population_cost": 1,
 		"unit_role": "worker",
 		"carry_capacity": 10,
 		"harvest_amount": 5,
@@ -60,6 +64,7 @@ const UNITS: Dictionary = {
 		"display_name": "Soldier",
 		"production_costs": {"wood": 20},
 		"production_duration": 15,
+		"population_cost": 1,
 		"unit_role": "soldier",
 		"hp": 30,
 		"max_hp": 30,
@@ -70,6 +75,7 @@ const UNITS: Dictionary = {
 		"display_name": "Archer",
 		"production_costs": {"wood": 15, "stone": 10},
 		"production_duration": 20,
+		"population_cost": 1,
 		"unit_role": "archer",
 		"hp": 20,
 		"max_hp": 20,
@@ -80,6 +86,7 @@ const UNITS: Dictionary = {
 
 ## Unit type produced by the stockpile (player base).
 const STOCKPILE_PRODUCES: String = "worker"
+const BASE_POPULATION_CAP: int = 5
 
 
 ## Returns full cost dictionary for a building: {"wood": N, "stone": M, ...}
@@ -125,6 +132,10 @@ static func get_stockpile_produces() -> String:
 	return STOCKPILE_PRODUCES
 
 
+static func get_base_population_cap() -> int:
+	return BASE_POPULATION_CAP
+
+
 ## Returns full production cost dictionary for a unit: {"wood": N, ...}
 static func get_unit_production_costs(unit_type: String) -> Dictionary:
 	var def: Dictionary = _get_unit_def(unit_type)
@@ -149,6 +160,16 @@ static func get_unit_production_duration(unit_type: String) -> int:
 static func get_unit_display_name(unit_type: String) -> String:
 	var def: Dictionary = _get_unit_def(unit_type)
 	return _get_string(def, "display_name", unit_type.capitalize())
+
+
+static func get_building_supply_provided(building_type: String) -> int:
+	var def: Dictionary = _get_building_def(building_type)
+	return _get_int(def, "supply_provided", 0)
+
+
+static func get_unit_population_cost(unit_type: String) -> int:
+	var def: Dictionary = _get_unit_def(unit_type)
+	return _get_int(def, "population_cost", 0)
 
 
 static func is_known_building_type(building_type: String) -> bool:

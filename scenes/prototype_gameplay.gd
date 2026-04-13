@@ -1,6 +1,7 @@
 extends Node2D
 
 const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
+const EnemyAIControllerClass = preload("res://simulation/enemy_ai_controller.gd")
 const GameStateClass = preload("res://simulation/game_state.gd")
 const BuildCommandSystemClass = preload("res://simulation/systems/build_command_system.gd")
 const CombatSystemClass = preload("res://simulation/systems/combat_system.gd")
@@ -40,6 +41,9 @@ var tick_manager: TickManager
 var client_state: ClientState
 var input_handler: InputHandler
 var command_panel: Control
+var enemy_ai_controller: EnemyAIController
+var endgame_overlay: ColorRect
+var endgame_label: Label
 var show_debug_overlay: bool = false
 
 func _ready() -> void:
@@ -51,6 +55,7 @@ func _ready() -> void:
 	state_hasher = StateHasherClass.new()
 	client_state = ClientStateClass.new()
 	input_handler = InputHandlerClass.new()
+	enemy_ai_controller = EnemyAIControllerClass.new()
 	var systems: Array[SimulationSystem] = []
 	systems.append(BuildCommandSystemClass.new())
 	systems.append(MoveCommandSystemClass.new())
@@ -64,7 +69,8 @@ func _ready() -> void:
 		command_buffer,
 		replay_log,
 		state_hasher,
-		systems
+		systems,
+		[enemy_ai_controller]
 	)
 
 	command_panel = CommandPanelClass.new()
@@ -73,6 +79,7 @@ func _ready() -> void:
 	command_panel.train_requested.connect(_on_train_requested)
 	command_panel.debug_toggle_requested.connect(_on_debug_toggle_requested)
 	command_panel.cancel_placement_requested.connect(_on_cancel_placement_requested)
+	_create_endgame_overlay()
 
 	client_state.set_camera_world_position(_map_center_world_position())
 	_apply_camera_to_node()
@@ -92,17 +99,23 @@ func _process(delta: float) -> void:
 		CELL_SIZE
 	)
 
-	var completed_steps: Array[Dictionary] = tick_manager.advance_by_time(delta)
+	var completed_steps: Array[Dictionary] = []
+	if not game_state.is_game_over():
+		completed_steps = tick_manager.advance_by_time(delta)
 	if not completed_steps.is_empty():
 		_sync_client_visuals_from_authoritative_state()
 
 	client_state.update_visual_interpolation(tick_manager.get_tick_progress())
 	_apply_camera_to_node()
 	_refresh_status_label()
+	_refresh_endgame_overlay()
 	command_panel.refresh(game_state, client_state)
 	renderer.queue_redraw()
 
 func _unhandled_input(event: InputEvent) -> void:
+	if game_state.is_game_over():
+		return
+
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT:
 		var left_mouse_event: InputEventMouseButton = event
 		if left_mouse_event.pressed:
@@ -216,6 +229,8 @@ func _create_initial_game_state() -> GameState:
 		"entity_type": "stockpile",
 		"owner_id": 1,
 		"grid_position": stockpile_cell,
+		"hp": 60,
+		"max_hp": 60,
 		"production_queue_count": 0,
 		"production_progress_ticks": 0,
 		"production_duration_ticks": 0,
@@ -265,6 +280,27 @@ func _create_initial_game_state() -> GameState:
 		"assigned_builder_id": 0,
 		"hp": 50,
 		"max_hp": 50,
+		"production_queue_count": 0,
+		"production_progress_ticks": 0,
+		"production_duration_ticks": 0,
+		"produced_unit_type": "",
+		"production_blocked": false,
+	}
+
+	var enemy_barracks_cell: Vector2i = Vector2i(15, 9)
+	var enemy_barracks_id: int = state.allocate_entity_id()
+	state.entities[enemy_barracks_id] = {
+		"id": enemy_barracks_id,
+		"entity_type": "structure",
+		"structure_type": "barracks",
+		"owner_id": 2,
+		"grid_position": enemy_barracks_cell,
+		"is_constructed": true,
+		"construction_progress_ticks": 0,
+		"construction_duration_ticks": 0,
+		"assigned_builder_id": 0,
+		"hp": 45,
+		"max_hp": 45,
 		"production_queue_count": 0,
 		"production_progress_ticks": 0,
 		"production_duration_ticks": 0,
@@ -387,11 +423,16 @@ func _cell_center_world(cell: Vector2i) -> Vector2:
 
 func _refresh_status_label() -> void:
 	var lines: Array[String] = []
+	var player_population_used: int = game_state.get_population_used(1)
+	var player_population_cap: int = game_state.get_population_cap(1)
 
-	lines.append("[b]Wood:[/b] %d  [b]Stone:[/b] %d" % [
+	lines.append("[b]Wood:[/b] %d  [b]Stone:[/b] %d  [b]Pop:[/b] %d / %d" % [
 		game_state.get_resource_amount("wood"),
 		game_state.get_resource_amount("stone"),
+		player_population_used,
+		player_population_cap,
 	])
+	lines.append("[b]Enemy:[/b] %s" % enemy_ai_controller.get_status_text(game_state))
 
 	var feedback: String = client_state.last_order_feedback
 	if feedback != "":
@@ -445,6 +486,36 @@ func _refresh_status_label() -> void:
 	debug_label.text = "\n".join(debug_lines)
 	debug_label.visible = show_debug_overlay
 	$CanvasLayer/DebugMargin.visible = show_debug_overlay
+
+
+func _create_endgame_overlay() -> void:
+	endgame_overlay = ColorRect.new()
+	endgame_overlay.color = Color(0.05, 0.05, 0.08, 0.72)
+	endgame_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	endgame_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	endgame_overlay.visible = false
+	$CanvasLayer.add_child(endgame_overlay)
+
+	endgame_label = Label.new()
+	endgame_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	endgame_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	endgame_label.add_theme_font_size_override("font_size", 52)
+	endgame_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+	endgame_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	endgame_label.visible = false
+	$CanvasLayer.add_child(endgame_label)
+
+
+func _refresh_endgame_overlay() -> void:
+	var show_overlay: bool = game_state.win_condition_met or game_state.lose_condition_met
+	endgame_overlay.visible = show_overlay
+	endgame_label.visible = show_overlay
+	if game_state.win_condition_met:
+		endgame_label.text = "You Win"
+	elif game_state.lose_condition_met:
+		endgame_label.text = "You Lose"
+	else:
+		endgame_label.text = ""
 
 func _last_authoritative_state_hash() -> String:
 	var hash_history: Array[String] = []
@@ -508,8 +579,17 @@ func _on_train_requested(producer_id: int) -> void:
 		unit_type = GameDefinitionsClass.get_building_produces(
 			game_state.get_entity_structure_type(entity)
 		)
-	if unit_type == "" or not game_state.can_afford_production(unit_type):
+	if unit_type == "":
+		client_state.set_order_feedback("This building cannot produce units.", true)
+		_refresh_status_label()
+		return
+	if not game_state.can_afford_production(unit_type):
 		client_state.set_order_feedback("Not enough resources.", true)
+		_refresh_status_label()
+		return
+	var owner_id: int = game_state.get_entity_owner_id(entity, 1)
+	if game_state.is_population_capped_for_unit(owner_id, unit_type):
+		client_state.set_order_feedback("Population cap reached. Need more houses.", true)
 		_refresh_status_label()
 		return
 	var cmd := QueueProductionCommandClass.new(

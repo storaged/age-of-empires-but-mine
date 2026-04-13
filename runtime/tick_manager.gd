@@ -14,6 +14,7 @@ var command_buffer: CommandBuffer
 var replay_log: ReplayLog
 var state_hasher: StateHasher
 var systems: Array[SimulationSystem] = []
+var controllers: Array[RefCounted] = []
 var authoritative_state_hash_history: Array[String] = []
 
 
@@ -22,13 +23,15 @@ func _init(
 	initial_command_buffer: CommandBuffer,
 	initial_replay_log: ReplayLog,
 	initial_state_hasher: StateHasher,
-	initial_systems: Array[SimulationSystem] = []
+	initial_systems: Array[SimulationSystem] = [],
+	initial_controllers: Array[RefCounted] = []
 ) -> void:
 	game_state = initial_game_state
 	command_buffer = initial_command_buffer
 	replay_log = initial_replay_log
 	state_hasher = initial_state_hasher
 	systems = initial_systems
+	controllers = initial_controllers
 
 
 func queue_command(command: SimulationCommand) -> void:
@@ -49,6 +52,7 @@ func advance_by_time(delta_seconds: float) -> Array[Dictionary]:
 
 func advance_one_tick() -> Dictionary:
 	var execution_tick: int = game_state.current_tick
+	_queue_controller_commands(execution_tick + 1)
 	var commands_for_tick: Array[SimulationCommand] = command_buffer.pop_commands_for_tick(execution_tick)
 
 	for command in commands_for_tick:
@@ -70,6 +74,20 @@ func advance_one_tick() -> Dictionary:
 		"current_tick": game_state.current_tick,
 		"debug_counter": game_state.debug_counter,
 	}
+
+
+func _queue_controller_commands(scheduled_tick: int) -> void:
+	for controller in controllers:
+		if controller == null:
+			continue
+		if not controller.has_method("build_commands_for_tick"):
+			continue
+		var command_values: Variant = controller.call("build_commands_for_tick", game_state, scheduled_tick)
+		if not (command_values is Array):
+			continue
+		for command_value in command_values:
+			if command_value is SimulationCommand:
+				queue_command(command_value)
 
 
 func get_fixed_step_microseconds() -> int:

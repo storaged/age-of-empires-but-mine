@@ -162,6 +162,11 @@ func _find_attack_slot(
 
 func _kill_entity(game_state: GameState, entity_id: int, entity: Dictionary) -> void:
 	var entity_type: String = game_state.get_entity_type(entity)
+	var owner_id: int = game_state.get_entity_owner_id(entity)
+	if entity_type == "stockpile" and owner_id == 1:
+		game_state.lose_condition_met = true
+	if entity_type == "structure" and owner_id == 2 and game_state.get_entity_structure_type(entity) == "enemy_base":
+		game_state.win_condition_met = true
 	if entity_type == "unit":
 		var cell: Vector2i = game_state.get_entity_grid_position(entity)
 		game_state.occupancy.erase(game_state.cell_key(cell))

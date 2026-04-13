@@ -10,6 +10,8 @@ var current_tick: int = 0
 var next_entity_id: int = 1
 var deterministic_seed: int = 1337
 var deterministic_rng_state: int = 1337
+var win_condition_met: bool = false
+var lose_condition_met: bool = false
 
 var entities: Dictionary = {}
 var map_data: Dictionary = {}
@@ -94,6 +96,10 @@ func get_entity_bool(entity: Dictionary, key: String, fallback: bool = false) ->
 		if entity_bool_value is bool:
 			return entity_bool_value
 	return fallback
+
+
+func is_game_over() -> bool:
+	return win_condition_met or lose_condition_met
 
 
 func get_resource_amount(resource_type: String) -> int:
@@ -482,6 +488,66 @@ func can_afford_production(unit_type: String) -> bool:
 	return true
 
 
+func get_population_used(owner_id: int) -> int:
+	var population_used: int = 0
+	for entity_id in get_entities_by_type("unit"):
+		var entity: Dictionary = get_entity_dict(entity_id)
+		if get_entity_owner_id(entity) != owner_id:
+			continue
+		var unit_role: String = get_entity_unit_role(entity)
+		if unit_role == "":
+			continue
+		population_used += GameDefinitionsClass.get_unit_population_cost(unit_role)
+	return population_used
+
+
+func get_population_reserved(owner_id: int) -> int:
+	var population_reserved: int = get_population_used(owner_id)
+	var producer_ids: Array[int] = []
+	for entity_id in get_entities_by_type("stockpile"):
+		producer_ids.append(entity_id)
+	for entity_id in get_entities_by_type("structure"):
+		producer_ids.append(entity_id)
+	producer_ids.sort()
+
+	for producer_id in producer_ids:
+		var producer_entity: Dictionary = get_entity_dict(producer_id)
+		if get_entity_owner_id(producer_entity) != owner_id:
+			continue
+		var queue_count: int = get_entity_production_queue_count(producer_entity)
+		if queue_count <= 0:
+			continue
+		var unit_type: String = get_entity_produced_unit_type(producer_entity)
+		if unit_type == "":
+			continue
+		population_reserved += queue_count * GameDefinitionsClass.get_unit_population_cost(unit_type)
+	return population_reserved
+
+
+func get_population_cap(owner_id: int) -> int:
+	var population_cap: int = GameDefinitionsClass.get_base_population_cap()
+	for entity_id in get_entities_by_type("structure"):
+		var entity: Dictionary = get_entity_dict(entity_id)
+		if get_entity_owner_id(entity) != owner_id:
+			continue
+		if not get_entity_is_constructed(entity):
+			continue
+		var structure_type: String = get_entity_structure_type(entity)
+		population_cap += GameDefinitionsClass.get_building_supply_provided(structure_type)
+	return population_cap
+
+
+func can_queue_population_for_unit(owner_id: int, unit_type: String) -> bool:
+	var population_cost: int = GameDefinitionsClass.get_unit_population_cost(unit_type)
+	if population_cost <= 0:
+		return true
+	return get_population_reserved(owner_id) + population_cost <= get_population_cap(owner_id)
+
+
+func is_population_capped_for_unit(owner_id: int, unit_type: String) -> bool:
+	return not can_queue_population_for_unit(owner_id, unit_type)
+
+
 ## Deducts all resource costs for producing a unit. Call only after can_afford_production() is true.
 func deduct_production_cost(unit_type: String) -> void:
 	var costs: Dictionary = GameDefinitionsClass.get_unit_production_costs(unit_type)
@@ -525,6 +591,8 @@ func to_authoritative_dict() -> Dictionary:
 		"next_entity_id": next_entity_id,
 		"deterministic_seed": deterministic_seed,
 		"deterministic_rng_state": deterministic_rng_state,
+		"win_condition_met": win_condition_met,
+		"lose_condition_met": lose_condition_met,
 		"entities": _canonicalize_variant(entities),
 		"map_data": _canonicalize_variant(map_data),
 		"occupancy": _canonicalize_variant(occupancy),
