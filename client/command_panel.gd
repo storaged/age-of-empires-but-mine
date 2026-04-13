@@ -8,11 +8,12 @@ const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const FoodReadinessClass = preload("res://simulation/food_readiness.gd")
 const StrategicTimingClass = preload("res://simulation/strategic_timing.gd")
 const VisibilityClass = preload("res://simulation/visibility.gd")
+const AssetCatalogClass = preload("res://rendering/asset_catalog.gd")
 
-const PANEL_HEIGHT: int = 144
-const DETAIL_WIDTH: int = 290
-const BUTTON_W: int = 104
-const BUTTON_H: int = 48
+const PANEL_HEIGHT: int = 132
+const DETAIL_WIDTH: int = 300
+const BUTTON_W: int = 98
+const BUTTON_H: int = 44
 const BUTTON_COLS: int = 4
 const BUTTON_ROWS: int = 2
 const BUTTON_GAP: int = 5
@@ -26,6 +27,8 @@ var _detail_label: RichTextLabel
 var _action_buttons: Array[Button] = []
 var _debug_button: Button
 var _current_actions: Array[Dictionary] = []
+var _click_player: AudioStreamPlayer
+var _hover_player: AudioStreamPlayer
 
 
 func _ready() -> void:
@@ -38,9 +41,15 @@ func _ready() -> void:
 	offset_left = 0.0
 	offset_right = 0.0
 	mouse_filter = MOUSE_FILTER_STOP
+	var panel_style: StyleBoxTexture = AssetCatalogClass.make_panel_style("blue")
+	if panel_style != null:
+		add_theme_stylebox_override("panel", panel_style)
+	var ui_font: FontFile = AssetCatalogClass.get_font()
+	if ui_font != null:
+		add_theme_font_override("font", ui_font)
 
 	var bg := ColorRect.new()
-	bg.color = Color("#0d1117")
+	bg.color = Color(0.05, 0.07, 0.09, 0.82)
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(bg)
 
@@ -59,6 +68,8 @@ func _ready() -> void:
 	_detail_label.scroll_active = false
 	_detail_label.position = Vector2(8, 6)
 	_detail_label.size = Vector2(DETAIL_WIDTH, PANEL_HEIGHT - 12)
+	if ui_font != null:
+		_detail_label.add_theme_font_override("normal_font", ui_font)
 	add_child(_detail_label)
 
 	var buttons_x: int = DETAIL_WIDTH + 16
@@ -74,6 +85,8 @@ func _ready() -> void:
 		btn.mouse_filter = Control.MOUSE_FILTER_STOP
 		btn.visible = false
 		btn.pressed.connect(_on_action_button_pressed.bind(i))
+		btn.mouse_entered.connect(_play_hover_sound)
+		_apply_button_skin(btn)
 		_action_buttons.append(btn)
 		add_child(btn)
 
@@ -86,7 +99,16 @@ func _ready() -> void:
 	_debug_button.offset_top = 8.0
 	_debug_button.offset_bottom = 38.0
 	_debug_button.pressed.connect(func() -> void: debug_toggle_requested.emit())
+	_debug_button.mouse_entered.connect(_play_hover_sound)
+	_apply_button_skin(_debug_button)
 	add_child(_debug_button)
+
+	_click_player = AudioStreamPlayer.new()
+	_click_player.stream = AssetCatalogClass.get_audio_stream("click")
+	add_child(_click_player)
+	_hover_player = AudioStreamPlayer.new()
+	_hover_player.stream = AssetCatalogClass.get_audio_stream("hover")
+	add_child(_hover_player)
 
 
 func refresh(game_state: GameState, client_state: ClientState) -> void:
@@ -579,6 +601,7 @@ func _on_action_button_pressed(index: int) -> void:
 	var action: Dictionary = _current_actions[index]
 	if not bool(action.get("enabled", false)):
 		return
+	_play_click_sound()
 	var action_type: String = str(action.get("type", ""))
 	match action_type:
 		"build":
@@ -587,3 +610,32 @@ func _on_action_button_pressed(index: int) -> void:
 			train_requested.emit(int(action.get("producer_id", 0)))
 		"cancel_placement":
 			cancel_placement_requested.emit()
+
+
+func _apply_button_skin(button: Button) -> void:
+	var normal_style: StyleBoxTexture = AssetCatalogClass.make_button_style("normal")
+	var hover_style: StyleBoxTexture = AssetCatalogClass.make_button_style("hover")
+	var pressed_style: StyleBoxTexture = AssetCatalogClass.make_button_style("pressed")
+	var disabled_style: StyleBoxTexture = AssetCatalogClass.make_button_style("disabled")
+	var ui_font: FontFile = AssetCatalogClass.get_font()
+	if normal_style != null:
+		button.add_theme_stylebox_override("normal", normal_style)
+	if hover_style != null:
+		button.add_theme_stylebox_override("hover", hover_style)
+	if pressed_style != null:
+		button.add_theme_stylebox_override("pressed", pressed_style)
+	if disabled_style != null:
+		button.add_theme_stylebox_override("disabled", disabled_style)
+	if ui_font != null:
+		button.add_theme_font_override("font", ui_font)
+	button.add_theme_font_size_override("font_size", 15)
+
+
+func _play_click_sound() -> void:
+	if _click_player != null and _click_player.stream != null:
+		_click_player.play()
+
+
+func _play_hover_sound() -> void:
+	if _hover_player != null and _hover_player.stream != null and not _hover_player.playing:
+		_hover_player.play()

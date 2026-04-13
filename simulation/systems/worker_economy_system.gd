@@ -2,6 +2,7 @@ class_name WorkerEconomySystem
 extends SimulationSystem
 
 const DeterministicPathfinderClass = preload("res://simulation/deterministic_pathfinder.gd")
+const TASK_REVALIDATE_WAIT_TICKS: int = 6
 
 
 func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], _tick: int) -> void:
@@ -37,13 +38,13 @@ func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], 
 func _update_to_resource(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
 	var resource_node_id: int = game_state.get_entity_assigned_resource_node_id(worker_entity)
 	if resource_node_id == 0 or not game_state.entities.has(resource_node_id):
-		_set_worker_idle(worker_entity)
+		_retire_worker_task(game_state, entity_id, worker_entity)
 		game_state.entities[entity_id] = worker_entity
 		return
 
 	var resource_entity: Dictionary = game_state.get_entity_dict(resource_node_id)
 	if game_state.get_entity_remaining_amount(resource_entity) <= 0:
-		_set_worker_idle(worker_entity)
+		_retire_worker_task(game_state, entity_id, worker_entity)
 		game_state.entities[entity_id] = worker_entity
 		return
 
@@ -58,7 +59,12 @@ func _update_to_resource(game_state: GameState, entity_id: int, worker_entity: D
 		game_state.entities[entity_id] = worker_entity
 		return
 
-	if game_state.get_entity_path_cells(worker_entity).is_empty():
+	if _worker_requires_task_revalidation(game_state, worker_entity) or _slot_invalid_for_target(
+		game_state,
+		worker_cell,
+		interaction_slot,
+		game_state.get_entity_grid_position(resource_entity)
+	):
 		_reassign_resource_slot(game_state, entity_id, worker_entity)
 		game_state.entities[entity_id] = worker_entity
 
@@ -73,6 +79,13 @@ func _update_gathering(game_state: GameState, entity_id: int, worker_entity: Dic
 	var resource_entity: Dictionary = game_state.get_entity_dict(resource_node_id)
 	var remaining_amount: int = game_state.get_entity_remaining_amount(resource_entity)
 	var carried_amount: int = game_state.get_entity_carried_amount(worker_entity)
+	var worker_cell: Vector2i = game_state.get_entity_grid_position(worker_entity)
+	var resource_cell: Vector2i = game_state.get_entity_grid_position(resource_entity)
+	if not game_state.are_cells_adjacent(worker_cell, resource_cell):
+		worker_entity["worker_task_state"] = "to_resource"
+		_reassign_resource_slot(game_state, entity_id, worker_entity)
+		game_state.entities[entity_id] = worker_entity
+		return
 	if remaining_amount <= 0:
 		if carried_amount > 0:
 			_assign_worker_to_stockpile(game_state, entity_id, worker_entity)
@@ -110,7 +123,7 @@ func _update_gathering(game_state: GameState, entity_id: int, worker_entity: Dic
 func _update_to_stockpile(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
 	var stockpile_id: int = game_state.get_entity_assigned_stockpile_id(worker_entity)
 	if stockpile_id == 0 or not game_state.entities.has(stockpile_id):
-		_set_worker_idle(worker_entity)
+		_find_new_stockpile_or_idle(game_state, entity_id, worker_entity)
 		game_state.entities[entity_id] = worker_entity
 		return
 
@@ -125,12 +138,31 @@ func _update_to_stockpile(game_state: GameState, entity_id: int, worker_entity: 
 		game_state.entities[entity_id] = worker_entity
 		return
 
-	if game_state.get_entity_path_cells(worker_entity).is_empty():
+	var stockpile_entity: Dictionary = game_state.get_entity_dict(stockpile_id)
+	if _worker_requires_task_revalidation(game_state, worker_entity) or _slot_invalid_for_target(
+		game_state,
+		worker_cell,
+		interaction_slot,
+		game_state.get_entity_grid_position(stockpile_entity)
+	):
 		_reassign_stockpile_slot(game_state, entity_id, worker_entity)
 		game_state.entities[entity_id] = worker_entity
 
 
 func _update_depositing(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
+	var stockpile_id: int = game_state.get_entity_assigned_stockpile_id(worker_entity)
+	if stockpile_id == 0 or not game_state.entities.has(stockpile_id):
+		_find_new_stockpile_or_idle(game_state, entity_id, worker_entity)
+		game_state.entities[entity_id] = worker_entity
+		return
+	var stockpile_entity: Dictionary = game_state.get_entity_dict(stockpile_id)
+	var worker_cell: Vector2i = game_state.get_entity_grid_position(worker_entity)
+	var stockpile_cell: Vector2i = game_state.get_entity_grid_position(stockpile_entity)
+	if not game_state.are_cells_adjacent(worker_cell, stockpile_cell):
+		worker_entity["worker_task_state"] = "to_stockpile"
+		_reassign_stockpile_slot(game_state, entity_id, worker_entity)
+		game_state.entities[entity_id] = worker_entity
+		return
 	var progress: int = game_state.get_entity_gather_progress(worker_entity) + 1
 	worker_entity["gather_progress_ticks"] = progress
 	var deposit_duration_ticks: int = maxi(game_state.get_entity_deposit_duration_ticks(worker_entity), 1)
@@ -174,6 +206,7 @@ func _update_to_construction(game_state: GameState, entity_id: int, worker_entit
 		return
 
 	var worker_cell: Vector2i = game_state.get_entity_grid_position(worker_entity)
+	var structure_cell: Vector2i = game_state.get_entity_grid_position(structure_entity)
 	var interaction_slot: Vector2i = game_state.get_entity_interaction_slot_cell(worker_entity)
 	if worker_cell == interaction_slot:
 		worker_entity["worker_task_state"] = "constructing"
@@ -184,7 +217,12 @@ func _update_to_construction(game_state: GameState, entity_id: int, worker_entit
 		game_state.entities[entity_id] = worker_entity
 		return
 
-	if game_state.get_entity_path_cells(worker_entity).is_empty():
+	if _worker_requires_task_revalidation(game_state, worker_entity) or _slot_invalid_for_target(
+		game_state,
+		worker_cell,
+		interaction_slot,
+		structure_cell
+	):
 		_reassign_construction_slot(game_state, entity_id, worker_entity)
 		game_state.entities[entity_id] = worker_entity
 
@@ -199,6 +237,14 @@ func _update_constructing(game_state: GameState, entity_id: int, worker_entity: 
 	var structure_entity: Dictionary = game_state.get_entity_dict(structure_id)
 	if game_state.get_entity_is_constructed(structure_entity):
 		_set_worker_idle(worker_entity)
+		game_state.entities[entity_id] = worker_entity
+		return
+
+	var worker_cell: Vector2i = game_state.get_entity_grid_position(worker_entity)
+	var structure_cell: Vector2i = game_state.get_entity_grid_position(structure_entity)
+	if not game_state.are_cells_adjacent(worker_cell, structure_cell):
+		worker_entity["worker_task_state"] = "to_construction"
+		_reassign_construction_slot(game_state, entity_id, worker_entity)
 		game_state.entities[entity_id] = worker_entity
 		return
 
@@ -228,7 +274,7 @@ func _assign_worker_to_resource(game_state: GameState, entity_id: int, worker_en
 func _assign_worker_to_stockpile(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
 	var stockpile_id: int = game_state.get_entity_assigned_stockpile_id(worker_entity)
 	if stockpile_id == 0 or not game_state.entities.has(stockpile_id):
-		_set_worker_idle(worker_entity)
+		_find_new_stockpile_or_idle(game_state, entity_id, worker_entity)
 		return
 	_reassign_stockpile_slot(game_state, entity_id, worker_entity)
 
@@ -381,3 +427,64 @@ func _set_worker_idle(worker_entity: Dictionary) -> void:
 	worker_entity["has_move_target"] = false
 	worker_entity["move_target"] = worker_cell
 	worker_entity["interaction_slot_cell"] = Vector2i(-1, -1)
+	worker_entity["movement_wait_ticks"] = 0
+	worker_entity["traffic_state"] = ""
+
+
+func _worker_requires_task_revalidation(game_state: GameState, worker_entity: Dictionary) -> bool:
+	var traffic_state: String = game_state.get_entity_string(worker_entity, "traffic_state", "")
+	if traffic_state == "stale_intent":
+		return true
+	if game_state.get_entity_movement_wait_ticks(worker_entity) >= TASK_REVALIDATE_WAIT_TICKS:
+		return true
+	return game_state.get_entity_path_cells(worker_entity).is_empty()
+
+
+func _slot_invalid_for_target(
+	game_state: GameState,
+	worker_cell: Vector2i,
+	slot_cell: Vector2i,
+	target_cell: Vector2i
+) -> bool:
+	if slot_cell == Vector2i(-1, -1):
+		return true
+	if worker_cell == slot_cell:
+		return not game_state.are_cells_adjacent(worker_cell, target_cell)
+	if not game_state.are_cells_adjacent(slot_cell, target_cell):
+		return true
+	return not game_state.is_cell_walkable(slot_cell)
+
+
+func _find_new_stockpile_or_idle(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
+	var stockpile_id: int = _find_best_stockpile_id(game_state, worker_entity)
+	if stockpile_id == 0:
+		_set_worker_idle(worker_entity)
+		return
+	worker_entity["assigned_stockpile_id"] = stockpile_id
+	_reassign_stockpile_slot(game_state, entity_id, worker_entity)
+
+
+func _retire_worker_task(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
+	if game_state.get_entity_carried_amount(worker_entity) > 0:
+		_find_new_stockpile_or_idle(game_state, entity_id, worker_entity)
+		return
+	_set_worker_idle(worker_entity)
+
+
+func _find_best_stockpile_id(game_state: GameState, worker_entity: Dictionary) -> int:
+	var owner_id: int = game_state.get_entity_owner_id(worker_entity)
+	var worker_cell: Vector2i = game_state.get_entity_grid_position(worker_entity)
+	var best_stockpile_id: int = 0
+	var best_distance: int = 999999
+	for entity_id in game_state.get_entities_by_type("stockpile"):
+		var stockpile_entity: Dictionary = game_state.get_entity_dict(entity_id)
+		if game_state.get_entity_owner_id(stockpile_entity) != owner_id:
+			continue
+		var stockpile_cell: Vector2i = game_state.get_entity_grid_position(stockpile_entity)
+		var distance: int = absi(stockpile_cell.x - worker_cell.x) + absi(stockpile_cell.y - worker_cell.y)
+		if distance < best_distance:
+			best_distance = distance
+			best_stockpile_id = entity_id
+		elif distance == best_distance and entity_id < best_stockpile_id:
+			best_stockpile_id = entity_id
+	return best_stockpile_id

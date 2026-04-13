@@ -18,9 +18,13 @@ var map_data: Dictionary = {}
 var occupancy: Dictionary = {}
 var resources: Dictionary = {}
 var production_queues: Dictionary = {}
+var scenario_state: Dictionary = {}
 ## Cache of cells blocked by structures, stockpiles, and resource nodes.
 ## Eliminates O(entity_count) scan in has_static_blocker_at_cell() during BFS.
 var static_blocker_cells: Dictionary = {}
+## Authoritative reserved footprint cells.
+## Used for safe spawning and path invalidation when local accessibility changes.
+var reserved_cells: Dictionary = {}
 
 # Phase 1 smoke-test state. Still authoritative data.
 var debug_counter: int = 0
@@ -139,6 +143,63 @@ func get_adjacent_walkable_cells(target_cell: Vector2i) -> Array[Vector2i]:
 	return adjacent_cells
 
 
+func get_service_cells() -> Dictionary:
+	var service_cells: Dictionary = {}
+	var structure_attack_offsets: Array[Vector2i] = [
+		Vector2i(1, 0),
+		Vector2i(-1, 0),
+		Vector2i(0, 1),
+		Vector2i(0, -1),
+	]
+	var entity_ids: Array = entities.keys()
+	entity_ids.sort()
+	for entity_id_variant in entity_ids:
+		if not (entity_id_variant is int):
+			continue
+		var entity_id: int = entity_id_variant
+		var entity: Dictionary = get_entity_dict(entity_id)
+		var entity_type: String = get_entity_type(entity)
+		var entity_cell: Vector2i = get_entity_grid_position(entity, Vector2i(-1, -1))
+		if entity_cell == Vector2i(-1, -1):
+			continue
+		if entity_type == "stockpile" or entity_type == "resource_node":
+			_mark_service_ring(service_cells, entity_cell)
+			continue
+		if entity_type == "structure":
+			_mark_service_ring(service_cells, entity_cell)
+			if get_entity_is_constructed(entity):
+				for offset in structure_attack_offsets:
+					_mark_service_cell(service_cells, entity_cell + offset)
+	return service_cells
+
+
+func is_service_cell(cell: Vector2i) -> bool:
+	return get_service_cells().has(cell_key(cell))
+
+
+func get_nearest_parking_cell(origin_cell: Vector2i, max_radius: int = 4) -> Vector2i:
+	var candidates: Array[Vector2i] = []
+	var service_cells: Dictionary = get_service_cells()
+	for radius in range(1, max_radius + 1):
+		for y in range(origin_cell.y - radius, origin_cell.y + radius + 1):
+			for x in range(origin_cell.x - radius, origin_cell.x + radius + 1):
+				var cell: Vector2i = Vector2i(x, y)
+				var distance: int = absi(cell.x - origin_cell.x) + absi(cell.y - origin_cell.y)
+				if distance == 0 or distance > max_radius:
+					continue
+				if not is_cell_valid_for_unit_spawn(cell):
+					continue
+				if service_cells.has(cell_key(cell)):
+					continue
+				candidates.append(cell)
+		if not candidates.is_empty():
+			break
+	candidates.sort_custom(Callable(self, "_sort_cells_by_row_then_col"))
+	for candidate in candidates:
+		return candidate
+	return origin_cell
+
+
 func get_worker_ids_for_assignment(
 	target_field: String,
 	target_id: int,
@@ -234,6 +295,29 @@ func _slot_before(a: Vector2i, b: Vector2i) -> bool:
 	if a.y != b.y:
 		return a.y < b.y
 	return a.x < b.x
+
+
+func _mark_service_ring(service_cells: Dictionary, target_cell: Vector2i) -> void:
+	var offsets: Array[Vector2i] = [
+		Vector2i(1, 0),
+		Vector2i(-1, 0),
+		Vector2i(0, 1),
+		Vector2i(0, -1),
+	]
+	for offset in offsets:
+		_mark_service_cell(service_cells, target_cell + offset)
+
+
+func _mark_service_cell(service_cells: Dictionary, cell: Vector2i) -> void:
+	if cell.x < 0 or cell.y < 0 or cell.x >= get_map_width() or cell.y >= get_map_height():
+		return
+	service_cells[cell_key(cell)] = true
+
+
+func _sort_cells_by_row_then_col(left: Vector2i, right: Vector2i) -> bool:
+	if left.y != right.y:
+		return left.y < right.y
+	return left.x < right.x
 
 
 func are_cells_adjacent(left: Vector2i, right: Vector2i) -> bool:
@@ -439,6 +523,8 @@ func is_cell_blocked(cell: Vector2i) -> bool:
 	var blocked_cells: Dictionary = get_blocked_cells()
 	if blocked_cells.has(cell_key(cell)):
 		return true
+	if has_reserved_cell(cell):
+		return true
 	return has_static_blocker_at_cell(cell)
 
 
@@ -459,10 +545,23 @@ func has_static_blocker_at_cell(cell: Vector2i) -> bool:
 	return static_blocker_cells.has(cell_key(cell))
 
 
+func has_reserved_cell(cell: Vector2i) -> bool:
+	return reserved_cells.has(cell_key(cell))
+
+
+func reserve_cell(cell: Vector2i) -> void:
+	reserved_cells[cell_key(cell)] = true
+
+
+func clear_reserved_cell(cell: Vector2i) -> void:
+	reserved_cells.erase(cell_key(cell))
+
+
 ## Mark a cell as permanently blocked by a static entity (structure/stockpile/resource_node).
 ## Call when placing these entities so BFS pathfinding stays O(1) per cell.
 func mark_static_blocker(cell: Vector2i) -> void:
 	static_blocker_cells[cell_key(cell)] = true
+	reserve_cell(cell)
 
 
 ## Rebuild the static blocker cache from scratch. Call once at game init.
@@ -484,6 +583,37 @@ func rebuild_static_blocker_cache() -> void:
 		if not (pos_value is Vector2i):
 			continue
 		static_blocker_cells[cell_key(pos_value)] = true
+	rebuild_reserved_cell_cache()
+
+
+func rebuild_reserved_cell_cache() -> void:
+	reserved_cells = {}
+	for entity_id in entities.keys():
+		var entity: Dictionary = get_entity_dict(entity_id)
+		var entity_type: String = get_entity_type(entity)
+		if entity_type != "resource_node" and entity_type != "stockpile" and entity_type != "structure":
+			continue
+		reserve_cell(get_entity_grid_position(entity))
+
+
+func is_cell_valid_for_unit_spawn(cell: Vector2i) -> bool:
+	if not is_cell_walkable(cell):
+		return false
+	if is_cell_occupied_by_unit(cell):
+		return false
+	if has_reserved_cell(cell):
+		return false
+	return true
+
+
+func is_cell_valid_for_structure_spawn(cell: Vector2i) -> bool:
+	if not is_cell_walkable(cell):
+		return false
+	if is_cell_occupied_by_unit(cell):
+		return false
+	if has_static_blocker_at_cell(cell):
+		return false
+	return true
 
 
 func get_active_builder_id_for_structure(structure_id: int) -> int:
@@ -757,6 +887,8 @@ func to_authoritative_dict() -> Dictionary:
 		"occupancy": _canonicalize_variant(occupancy),
 		"resources": _canonicalize_variant(resources),
 		"production_queues": _canonicalize_variant(production_queues),
+		"reserved_cells": _canonicalize_variant(reserved_cells),
+		"scenario_state": _canonicalize_variant(scenario_state),
 		"debug_counter": debug_counter,
 		"executed_command_ids": _canonicalize_variant(executed_command_ids),
 	}

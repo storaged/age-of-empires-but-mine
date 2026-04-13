@@ -182,7 +182,109 @@
 - `renderer.configure(…, cfg)` — applies faction color overrides from config
 - `prototype_gameplay.set_match_config(cfg)` — receives config; falls back to Normal defaults if launched directly
 
-## Current Regression Coverage (20 tests)
+### Phase 32 — Scenario Setup / Real Match Config
+- moved match-start scenario layout out of hardcoded gameplay scene logic and into small deterministic preset files
+- added preset layer:
+  - `simulation/presets/map_presets.gd`
+  - `simulation/presets/ai_presets.gd`
+  - `simulation/presets/color_presets.gd`
+- `MatchConfig` now transports:
+  - selected preset ids
+  - resolved map layout data
+  - resolved AI aggression timing
+  - resolved faction color values
+- pregame now exposes selectors for:
+  - map preset
+  - AI aggression preset
+  - color preset
+- added at least 2 selectable map presets with distinct initial authoritative layouts
+- added 3 AI aggression presets:
+  - Relaxed
+  - Standard
+  - Rush
+- renderer now consumes color preset values through `MatchConfig`
+- gameplay scene now builds initial `GameState` from `MatchConfig`, not its own hardcoded scenario source
+- new focused regression coverage for map preset divergence, AI timing preset application, and color/default transport
+
+### Phase 33 — Visual Language + Juice Pass
+- renderer upgraded from debug geometry toward a coherent procedural RTS prototype visual language
+- terrain now has layered ground treatment instead of flat debug fill only
+- obstacles now read more clearly as ridges / rocks with shadow and highlight
+- units now have stronger silhouettes, role glyphs, faction accents, and softer authoritative markers
+- structures now have clearer type silhouettes:
+  - stockpile
+  - house
+  - farm
+  - barracks
+  - archery range
+  - enemy structures
+
+### Phase 34 — Scenario Layer + Mission HUD Reframe
+- headless scenario data split into maps, enemy plans, and scenarios
+- deterministic scenario runtime now evaluated from authoritative ticks
+- 3 authored scenarios with distinct layout / pressure / objectives
+- pregame became scenario-first instead of raw sandbox config
+- HUD reframed into mission panel + alerts + cleaner player-facing hierarchy
+
+### Phase 35 — Deterministic Movement Recovery + Safe Spawn / Reservation
+- deterministic nearest-valid spawn resolution for initial and scripted unit spawns
+- initial structure placement now resolves against blocked/resource/static cells deterministically
+- reserved/static footprint changes now invalidate stale paths and trigger bounded recovery
+- melee attackers now claim deterministic reachable attack slots instead of piling into one lane
+- blocker cache now rebuilds cleanly after static entity death
+- new regression coverage for spawn resolution, stale-path recovery, worker/build contention, and melee pressure
+
+### Phase 36 — Deterministic Task Revalidation + General Deadlock Breakers
+- movement recovery now escalates from stale path to stale intent
+- worker logistics tasks revalidate stockpile/resource/construction targets and slots
+- workers retarget or idle cleanly when delivery/resource/construction targets vanish or become invalid
+- attack / attack-move states revalidate stale target slots instead of preserving old blocked intent
+- plain move / rally intents now abandon unreachable stale loops deterministically
+- added regression coverage for destroyed stockpile, depleted resource, invalid construction, reciprocal worker deadlock, and unreachable stale intent
+
+### Phase 37 — Service-Cell Yielding + First Asset-Backed Presentation
+- authoritative service-cell helpers now mark operational cells around:
+  - stockpiles
+  - resource nodes
+  - construction/structure footprints
+  - melee structure approach cells
+- idle units standing in service cells now vacate to nearest deterministic parking cell
+- active friendly traffic can trigger idle friendly blockers to yield from service cells
+- added regression coverage for:
+  - idle blocker vacating stockpile service access
+  - idle blocker vacating local gather/build service lane
+- renderer now uses local Kenney assets with safe fallback for:
+  - terrain tiles
+  - obstacles
+  - resources
+  - structures
+  - units
+  - projectile / hit / completion effects
+- command panel and pregame now use first-pass Kenney UI skin + lightweight UI audio
+- gameplay HUD panels now have first-pass asset skin and alert audio
+- renderer/client stayed read-only; authoritative gameplay changes limited to deterministic movement yield rules
+
+### Phase 38 — Camera / Scale / Tile Composition / Readability
+- `rendering/asset_aliases_medieval_rts.gd` is now respected through `asset_catalog.gd` for human-approved medieval RTS alias mapping
+- renderer now distinguishes semantic tile classes:
+  - base terrain
+  - full road tiles
+  - road overlays
+  - decorative tree clusters
+  - farm plot tiles
+- ground composition is now deterministic and region-based instead of noisy checkerboard-per-cell tiling
+- roads now appear as logical service strips around structures/resources instead of random tile variation
+- default gameplay camera starts closer for larger/more readable unit and structure presentation
+- units/resources/structures render materially larger with safer feet/base anchoring
+- unit selectors moved to softer under-sprite rings so they no longer dominate the silhouette
+- added light presentation motion/readability polish:
+  - subtle idle bob
+  - selection pulse
+  - clearer projectile sprite sizing
+  - cleaner completion pulse scale
+- HUD/panel sizing tightened to fit the closer world framing without swallowing screen space
+
+## Current Regression Coverage (23 tests)
 
 ```bash
 godot4 --headless --script tests/gather_test.gd
@@ -205,32 +307,26 @@ godot4 --headless --script tests/visibility_gating_test.gd
 godot4 --headless --script tests/worker_deposit_robustness_test.gd
 godot4 --headless --script tests/attack_move_test.gd
 godot4 --headless --script tests/interaction_slot_test.gd
+godot4 --headless --script tests/scenario_setup_test.gd
+godot4 --headless --script tests/scenario_runtime_test.gd
 ```
 
 ## Best Next Work
 
-### Option A — Map / Scenario Variety
-- pass map layout (blocked cells, resource positions, starting units) through `MatchConfig`
-- add a second map or procedural blocked-cell variation selectable in pregame
-- keeps pregame screen useful and extensible
+### Option A — Mission-Specific Enemy Plans
+- keep scenario layer, but make enemy plans feel more distinct than timing only
+- examples: hold-position wave, flank route, delayed tech switch
+- still deterministic and command-driven
 
-### Option B — Deeper Economy / Tech Tree
-- stone-gated buildings or unit upgrades via definition-driven prerequisite extension
-- add a second-tier military unit (knight, crossbow, siege)
-- all costs/durations stay in `game_definitions.gd`
+### Option B — Mission-Specific Objectives / Rewards
+- richer objective chains and scenario events on top of the new runtime
+- examples: protect caravan, hold chokepoint, build by deadline
 
-### Option C — Smarter Enemy AI
-- AI selects unit composition based on player army composition
-- AI builds economy structures (farms, houses) instead of only military
-- AI uses attack-move command instead of raw attack
-- stays within the same non-Node command-pipeline architecture
+### Option C — Cleaner Game HUD / Selection Info
+- now that mission HUD exists, refine selection/readiness panel hierarchy further
+- keep player-facing HUD and debug overlay clearly separated
 
-### Option D — Replay Playback UI
-- `ReplayLog` already records all commands
-- add a headless replay runner that re-executes log and snapshots per-tick state
-- verify state hash sequence matches original session
-
-### Option E — Multiplayer / Lockstep Foundation
+### Option D — Multiplayer / Lockstep Foundation
 - only after gameplay shape stabilizes further
 - serialization hardening of `GameState` (all fields explicit, no implicit defaults)
 - lockstep validation: two local clients, same command stream, hash comparison
@@ -245,7 +341,7 @@ godot4 --headless --script tests/interaction_slot_test.gd
 - advanced building footprints
 - broad AI strategy layer
 - formation / squad behavior
-- second map or map selection
+- generic scenario editor
 
 ## Rules
 

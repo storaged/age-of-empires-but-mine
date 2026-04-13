@@ -6,6 +6,8 @@ const MatchConfigClass = preload("res://simulation/match_config.gd")
 const FoodReadinessClass = preload("res://simulation/food_readiness.gd")
 const GameStateClass = preload("res://simulation/game_state.gd")
 const StrategicTimingClass = preload("res://simulation/strategic_timing.gd")
+const ScenarioRuntimeClass = preload("res://simulation/scenario_runtime.gd")
+const DeterministicPathfinderClass = preload("res://simulation/deterministic_pathfinder.gd")
 const BuildCommandSystemClass = preload("res://simulation/systems/build_command_system.gd")
 const CombatSystemClass = preload("res://simulation/systems/combat_system.gd")
 const GatherCommandSystemClass = preload("res://simulation/systems/gather_command_system.gd")
@@ -22,14 +24,14 @@ const ClientStateClass = preload("res://client/client_state.gd")
 const InputHandlerClass = preload("res://client/input_handler.gd")
 const CommandPanelClass = preload("res://client/command_panel.gd")
 const QueueProductionCommandClass = preload("res://commands/queue_production_command.gd")
+const AssetCatalogClass = preload("res://rendering/asset_catalog.gd")
 
-const MAP_WIDTH: int = 20
-const MAP_HEIGHT: int = 14
 const CELL_SIZE: int = 64
 const CAMERA_SPEED: float = 900.0
-const MIN_CAMERA_ZOOM: float = 0.5
-const MAX_CAMERA_ZOOM: float = 1.8
-const ZOOM_STEP: float = 0.1
+const DEFAULT_CAMERA_ZOOM: float = 0.82
+const MIN_CAMERA_ZOOM: float = 0.55
+const MAX_CAMERA_ZOOM: float = 1.45
+const ZOOM_STEP: float = 0.08
 const CLICK_SELECTION_THRESHOLD: float = 10.0
 
 @onready var camera: Camera2D = $Camera2D
@@ -50,7 +52,15 @@ var command_panel: Control
 var enemy_ai_controller: EnemyAIController
 var endgame_overlay: ColorRect
 var endgame_label: Label
+var mission_label: RichTextLabel
+var alert_label: RichTextLabel
 var show_debug_overlay: bool = false
+var _shown_scenario_alert_count: int = 0
+var _presentation_alerts: Array[Dictionary] = []
+var _last_structure_constructed: Dictionary = {}
+var _last_player_hp: Dictionary = {}
+var _last_attack_alert_tick: int = -999
+var _alert_player: AudioStreamPlayer
 
 func set_match_config(cfg: MatchConfigClass) -> void:
 	_match_config = cfg
@@ -67,6 +77,7 @@ func _ready() -> void:
 	replay_log = ReplayLogClass.new()
 	state_hasher = StateHasherClass.new()
 	client_state = ClientStateClass.new()
+	client_state.set_camera_zoom(DEFAULT_CAMERA_ZOOM)
 	input_handler = InputHandlerClass.new()
 	enemy_ai_controller = EnemyAIControllerClass.new()
 	enemy_ai_controller.configure(_match_config)
@@ -79,6 +90,7 @@ func _ready() -> void:
 	systems.append(WorkerEconomySystemClass.new())
 	systems.append(StructureEconomySystemClass.new())
 	systems.append(ProductionSystemClass.new())
+	systems.append(ScenarioRuntimeClass.new())
 	tick_manager = TickManagerClass.new(
 		game_state,
 		command_buffer,
@@ -95,6 +107,9 @@ func _ready() -> void:
 	command_panel.debug_toggle_requested.connect(_on_debug_toggle_requested)
 	command_panel.cancel_placement_requested.connect(_on_cancel_placement_requested)
 	_create_endgame_overlay()
+	_create_mission_hud()
+	_apply_hud_skin()
+	_prime_presentation_alert_state()
 
 	client_state.set_camera_world_position(_map_center_world_position())
 	_apply_camera_to_node()
@@ -103,6 +118,7 @@ func _ready() -> void:
 	renderer.configure(game_state, client_state, CELL_SIZE, _match_config)
 	renderer.queue_redraw()
 	_refresh_status_label()
+	_refresh_mission_panel()
 	command_panel.refresh(game_state, client_state)
 
 func _process(delta: float) -> void:
@@ -119,10 +135,12 @@ func _process(delta: float) -> void:
 		completed_steps = tick_manager.advance_by_time(delta)
 	if not completed_steps.is_empty():
 		_sync_client_visuals_from_authoritative_state()
+		_refresh_alert_feed()
 
 	client_state.update_visual_interpolation(tick_manager.get_tick_progress())
 	_apply_camera_to_node()
 	_refresh_status_label()
+	_refresh_mission_panel()
 	_refresh_endgame_overlay()
 	command_panel.refresh(game_state, client_state)
 	renderer.queue_redraw()
@@ -232,99 +250,116 @@ func _unhandled_input(event: InputEvent) -> void:
 func _create_initial_game_state() -> GameState:
 	var state: GameState = GameStateClass.new()
 	state.resources = {
-		"food": 0,
-		"wood": 0,
-		"stone": 0,
+		"food": int(_match_config.starting_resources.get("food", 0)),
+		"wood": int(_match_config.starting_resources.get("wood", 0)),
+		"stone": int(_match_config.starting_resources.get("stone", 0)),
 	}
 	state.map_data = {
-		"width": MAP_WIDTH,
-		"height": MAP_HEIGHT,
+		"width": _match_config.map_width,
+		"height": _match_config.map_height,
 		"cell_size": CELL_SIZE,
-		"blocked_cells": _build_blocked_cells(),
+		"blocked_cells": _build_blocked_cells_from_config(),
 	}
+	state.scenario_state = _build_initial_scenario_state()
 
-	var stockpile_cell: Vector2i = Vector2i(2, 2)
-	var stockpile_id: int = state.allocate_entity_id()
-	state.entities[stockpile_id] = GameDefinitionsClass.create_stockpile_entity(
-		stockpile_id,
-		1,
-		stockpile_cell
-	)
+	var player_stockpile_id: int = _spawn_start_structures(state, _match_config.player_start_structures, 1)
+	_spawn_start_structures(state, _match_config.enemy_start_structures, 2)
 
-	var wood_cells: Array[Vector2i] = [
-		Vector2i(15, 4),
-		Vector2i(15, 5),
-	]
-	for resource_cell in wood_cells:
+	for resource_node in _match_config.resource_nodes:
 		var resource_node_id: int = state.allocate_entity_id()
+		var resource_cell: Vector2i = Vector2i.ZERO
+		if resource_node.has("cell"):
+			var resource_cell_value: Variant = resource_node["cell"]
+			if resource_cell_value is Vector2i:
+				resource_cell = resource_cell_value
+		var resource_type: String = str(resource_node.get("type", "wood"))
+		var resource_amount: int = int(resource_node.get("amount", 0))
 		state.entities[resource_node_id] = GameDefinitionsClass.create_resource_node_entity(
-			"wood",
+			resource_type,
 			resource_node_id,
 			resource_cell,
-			80
+			resource_amount
 		)
+		state.mark_static_blocker(resource_cell)
+	_spawn_start_units(state, _match_config.player_start_units, 1, player_stockpile_id)
+	_spawn_start_units(state, _match_config.enemy_start_units, 2, 0)
+	return state
 
-	var stone_cells: Array[Vector2i] = [
-		Vector2i(5, 11),
-		Vector2i(6, 11),
-	]
-	for stone_cell in stone_cells:
-		var stone_node_id: int = state.allocate_entity_id()
-		state.entities[stone_node_id] = GameDefinitionsClass.create_resource_node_entity(
-			"stone",
-			stone_node_id,
-			stone_cell,
-			60
-		)
 
-	var enemy_base_cell: Vector2i = Vector2i(17, 8)
-	var enemy_base_id: int = state.allocate_entity_id()
-	state.entities[enemy_base_id] = GameDefinitionsClass.create_structure_entity(
-		"enemy_base",
-		enemy_base_id,
-		2,
-		enemy_base_cell
-	)
-
-	var enemy_barracks_cell: Vector2i = Vector2i(15, 9)
-	var enemy_barracks_id: int = state.allocate_entity_id()
-	state.entities[enemy_barracks_id] = GameDefinitionsClass.create_structure_entity(
-		"barracks",
-		enemy_barracks_id,
-		2,
-		enemy_barracks_cell
-	)
-
-	var enemy_unit_cells: Array[Vector2i] = [Vector2i(15, 8), Vector2i(16, 10)]
-	for enemy_cell in enemy_unit_cells:
-		var enemy_id: int = state.allocate_entity_id()
-		state.entities[enemy_id] = GameDefinitionsClass.create_unit_entity(
-			"enemy_dummy",
-			enemy_id,
-			2,
-			enemy_cell,
+func _spawn_start_structures(state: GameState, layout: Array[Dictionary], owner_id: int) -> int:
+	var first_stockpile_id: int = 0
+	for entry in layout:
+		var structure_type: String = str(entry.get("structure_type", ""))
+		var cell_value: Variant = entry.get("cell", Vector2i.ZERO)
+		if structure_type == "" or not (cell_value is Vector2i):
+			continue
+		var spawn_cell: Vector2i = DeterministicPathfinderClass.find_nearest_valid_structure_cell(state, cell_value)
+		if spawn_cell == DeterministicPathfinderClass.INVALID_CELL:
+			push_error("No valid structure spawn for %s at %s" % [structure_type, str(cell_value)])
+			continue
+		var entity_id: int = state.allocate_entity_id()
+		var is_constructed: bool = bool(entry.get("is_constructed", true))
+		state.entities[entity_id] = GameDefinitionsClass.create_structure_entity(
+			structure_type,
+			entity_id,
+			owner_id,
+			spawn_cell,
+			is_constructed,
 			0
 		)
-		state.occupancy["%d,%d" % [enemy_cell.x, enemy_cell.y]] = enemy_id
+		state.reserve_cell(spawn_cell)
+		if structure_type == "stockpile" and first_stockpile_id == 0:
+			first_stockpile_id = entity_id
+	return first_stockpile_id
 
-	var starting_cells: Array[Vector2i] = [
-		Vector2i(3, 3),
-		Vector2i(4, 3),
-		Vector2i(3, 4),
-		Vector2i(4, 4),
-	]
-	for cell in starting_cells:
-		var unit_id: int = state.allocate_entity_id()
-		state.entities[unit_id] = GameDefinitionsClass.create_unit_entity(
-			"worker",
-			unit_id,
-			1,
-			cell,
-			stockpile_id
+
+func _spawn_start_units(
+	state: GameState,
+	layout: Array[Dictionary],
+	owner_id: int,
+	default_stockpile_id: int
+) -> void:
+	for entry in layout:
+		var unit_type: String = str(entry.get("unit_type", ""))
+		var cell_value: Variant = entry.get("cell", Vector2i.ZERO)
+		if unit_type == "" or not (cell_value is Vector2i):
+			continue
+		var spawn_cell: Vector2i = DeterministicPathfinderClass.find_nearest_valid_unit_spawn_cell(state, cell_value)
+		if spawn_cell == DeterministicPathfinderClass.INVALID_CELL:
+			push_error("No valid unit spawn for %s at %s" % [unit_type, str(cell_value)])
+			continue
+		var producer_id: int = default_stockpile_id if unit_type == "worker" else 0
+		var entity_id: int = state.allocate_entity_id()
+		state.entities[entity_id] = GameDefinitionsClass.create_unit_entity(
+			unit_type,
+			entity_id,
+			owner_id,
+			spawn_cell,
+			producer_id
 		)
-		state.occupancy["%d,%d" % [cell.x, cell.y]] = unit_id
+		state.occupancy[state.cell_key(spawn_cell)] = entity_id
 
-	return state
+
+func _build_initial_scenario_state() -> Dictionary:
+	var objectives: Array[Dictionary] = []
+	for objective in _match_config.scenario_objectives:
+		var next_objective: Dictionary = objective.duplicate(true)
+		next_objective["completed"] = false
+		next_objective["completed_tick"] = -1
+		objectives.append(next_objective)
+	return {
+		"id": _match_config.scenario_id,
+		"title": _match_config.scenario_title,
+		"subtitle": _match_config.scenario_subtitle,
+		"briefing": _match_config.scenario_briefing,
+		"enemy_plan_id": _match_config.scenario_enemy_plan_id,
+		"objectives": objectives,
+		"events": _match_config.scenario_events.duplicate(true),
+		"victory_condition": _match_config.scenario_victory_condition.duplicate(true),
+		"defeat_condition": _match_config.scenario_defeat_condition.duplicate(true),
+		"alerts": [],
+		"fired_event_ids": [],
+	}
 
 func _sync_client_visuals_from_authoritative_state() -> void:
 	var valid_unit_ids: Array[int] = []
@@ -365,7 +400,7 @@ func _update_camera_from_input(delta: float) -> void:
 	client_state.set_camera_world_position(_clamp_camera_world_position(next_position))
 
 func _clamp_camera_world_position(world_position: Vector2) -> Vector2:
-	var map_size: Vector2 = Vector2(MAP_WIDTH * CELL_SIZE, MAP_HEIGHT * CELL_SIZE)
+	var map_size: Vector2 = Vector2(game_state.get_map_width() * CELL_SIZE, game_state.get_map_height() * CELL_SIZE)
 	return Vector2(
 		clampf(world_position.x, 0.0, map_size.x),
 		clampf(world_position.y, 0.0, map_size.y)
@@ -376,7 +411,7 @@ func _apply_camera_to_node() -> void:
 	camera.zoom = Vector2.ONE * client_state.camera_zoom
 
 func _map_center_world_position() -> Vector2:
-	return Vector2(MAP_WIDTH * CELL_SIZE, MAP_HEIGHT * CELL_SIZE) * 0.5
+	return Vector2(game_state.get_map_width() * CELL_SIZE, game_state.get_map_height() * CELL_SIZE) * 0.5
 
 func _cell_center_world(cell: Vector2i) -> Vector2:
 	return Vector2(
@@ -400,25 +435,26 @@ func _refresh_status_label() -> void:
 			player_population_cap,
 		]
 
-	lines.append("[b]Food:[/b] %d  [b]Wood:[/b] %d  [b]Stone:[/b] %d  [b]Pop:[/b] %s" % [
+	lines.append("[b]Food[/b] %d   [b]Wood[/b] %d   [b]Stone[/b] %d   [b]Pop[/b] %s" % [
 		game_state.get_resource_amount("food"),
 		game_state.get_resource_amount("wood"),
 		game_state.get_resource_amount("stone"),
 		pop_summary,
 	])
-	lines.append("[b]Stage:[/b] %s  [color=%s]%s[/color]" % [
+	lines.append("[b]%s[/b]  [color=%s]%s[/color]  [color=gray]%s[/color]" % [
 		str(strategic_summary.get("stage_label", "")),
 		str(timing_state.get("color", "lightgreen")),
 		str(timing_state.get("label", "")),
+		_match_config.scenario_title,
 	])
-	lines.append("[b]Goal:[/b] %s  [b]Bottleneck:[/b] %s" % [
+	lines.append("[b]Goal[/b] %s   [b]Blocker[/b] %s   [b]Pressure[/b] %s" % [
 		str(strategic_summary.get("next_goal", "")),
 		str(strategic_summary.get("bottleneck", "")),
-	])
-	lines.append("[b]Food Flow:[/b] %s" % _format_food_flow_summary(food_summary))
-	lines.append("[b]Enemy:[/b] %s  [b]Pressure:[/b] %s" % [
-		enemy_ai_controller.get_status_text(game_state),
 		StrategicTimingClass.get_enemy_pressure_text(game_state),
+	])
+	lines.append("[b]Enemy[/b] %s   [b]Food Flow[/b] %s" % [
+		enemy_ai_controller.get_status_text(game_state),
+		_format_food_flow_summary(food_summary),
 	])
 
 	var feedback: String = client_state.last_order_feedback
@@ -475,6 +511,220 @@ func _refresh_status_label() -> void:
 	$CanvasLayer/DebugMargin.visible = show_debug_overlay
 
 
+func _create_mission_hud() -> void:
+	$CanvasLayer/SummaryMargin.offset_right = 472.0
+	$CanvasLayer/SummaryMargin.offset_bottom = 108.0
+	$CanvasLayer/SummaryMargin/SummaryPanel.custom_minimum_size = Vector2(436, 72)
+	$CanvasLayer/SummaryMargin/SummaryPanel/StatusLabel.custom_minimum_size = Vector2(418, 66)
+	$CanvasLayer/SummaryMargin/SummaryPanel/StatusLabel.scroll_active = false
+
+	var mission_margin: MarginContainer = MarginContainer.new()
+	mission_margin.name = "MissionMargin"
+	mission_margin.anchor_left = 0.0
+	mission_margin.anchor_top = 0.0
+	mission_margin.anchor_right = 0.0
+	mission_margin.anchor_bottom = 0.0
+	mission_margin.offset_left = 16.0
+	mission_margin.offset_top = 122.0
+	mission_margin.offset_right = 336.0
+	mission_margin.offset_bottom = 338.0
+	mission_margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	$CanvasLayer.add_child(mission_margin)
+
+	var mission_panel: PanelContainer = PanelContainer.new()
+	mission_panel.custom_minimum_size = Vector2(304, 204)
+	mission_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	mission_margin.add_child(mission_panel)
+
+	mission_label = RichTextLabel.new()
+	mission_label.bbcode_enabled = true
+	mission_label.scroll_active = false
+	mission_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	mission_label.custom_minimum_size = Vector2(280, 188)
+	mission_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	mission_panel.add_child(mission_label)
+
+	var alert_margin: MarginContainer = MarginContainer.new()
+	alert_margin.name = "AlertMargin"
+	alert_margin.anchor_left = 1.0
+	alert_margin.anchor_top = 0.0
+	alert_margin.anchor_right = 1.0
+	alert_margin.anchor_bottom = 0.0
+	alert_margin.offset_left = -344.0
+	alert_margin.offset_top = 16.0
+	alert_margin.offset_right = -16.0
+	alert_margin.offset_bottom = 184.0
+	alert_margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	$CanvasLayer.add_child(alert_margin)
+
+	var alert_panel: PanelContainer = PanelContainer.new()
+	alert_panel.custom_minimum_size = Vector2(312, 142)
+	alert_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	alert_margin.add_child(alert_panel)
+
+	alert_label = RichTextLabel.new()
+	alert_label.bbcode_enabled = true
+	alert_label.scroll_active = false
+	alert_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	alert_label.custom_minimum_size = Vector2(288, 124)
+	alert_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	alert_panel.add_child(alert_label)
+
+
+func _apply_hud_skin() -> void:
+	var panel_style: StyleBoxTexture = AssetCatalogClass.make_panel_style("blue")
+	var mission_style: StyleBoxTexture = AssetCatalogClass.make_panel_style("green")
+	var ui_font: FontFile = AssetCatalogClass.get_font()
+	if panel_style != null:
+		$CanvasLayer/SummaryMargin/SummaryPanel.add_theme_stylebox_override("panel", panel_style)
+		$CanvasLayer/DebugMargin/DebugPanel.add_theme_stylebox_override("panel", panel_style)
+		if mission_label != null and mission_label.get_parent() is PanelContainer:
+			var mission_panel: PanelContainer = mission_label.get_parent()
+			mission_panel.add_theme_stylebox_override("panel", mission_style if mission_style != null else panel_style)
+		if alert_label != null and alert_label.get_parent() is PanelContainer:
+			var alert_panel: PanelContainer = alert_label.get_parent()
+			alert_panel.add_theme_stylebox_override("panel", panel_style)
+	if ui_font != null:
+		status_label.add_theme_font_override("normal_font", ui_font)
+		debug_label.add_theme_font_override("normal_font", ui_font)
+		if mission_label != null:
+			mission_label.add_theme_font_override("normal_font", ui_font)
+		if alert_label != null:
+			alert_label.add_theme_font_override("normal_font", ui_font)
+	_alert_player = AudioStreamPlayer.new()
+	_alert_player.stream = AssetCatalogClass.get_audio_stream("alert")
+	$CanvasLayer.add_child(_alert_player)
+
+
+func _prime_presentation_alert_state() -> void:
+	var entity_ids: Array = game_state.entities.keys()
+	entity_ids.sort()
+	for entity_id in entity_ids:
+		var entity: Dictionary = game_state.get_entity_dict(entity_id)
+		if game_state.get_entity_type(entity) == "structure" or game_state.get_entity_type(entity) == "stockpile":
+			_last_structure_constructed[entity_id] = game_state.get_entity_is_constructed(entity)
+			if game_state.get_entity_owner_id(entity, 0) == 1:
+				_last_player_hp[entity_id] = game_state.get_entity_hp(entity)
+	_refresh_alert_feed()
+
+
+func _refresh_mission_panel() -> void:
+	if mission_label == null:
+		return
+	var lines: Array[String] = []
+	lines.append("[b]%s[/b]" % _match_config.scenario_title)
+	lines.append("[color=gray]%s[/color]" % _match_config.scenario_subtitle)
+	lines.append("")
+	lines.append("[b]Objectives[/b]")
+	for objective in _get_scenario_objectives():
+		var done: bool = bool(objective.get("completed", false))
+		var mark: String = "[color=lightgreen]✓[/color]" if done else "[color=khaki]•[/color]"
+		lines.append("%s %s" % [mark, str(objective.get("text", ""))])
+	lines.append("")
+	lines.append("[b]Enemy plan[/b] %s" % _match_config.ai_aggression_display_name)
+	lines.append("[b]Pressure[/b] %s" % StrategicTimingClass.get_enemy_pressure_text(game_state))
+	lines.append("[b]Status[/b] %s" % enemy_ai_controller.get_status_text(game_state))
+	mission_label.text = "\n".join(lines)
+
+
+func _refresh_alert_feed() -> void:
+	_pull_scenario_alerts()
+	_pull_local_state_alerts()
+	if alert_label == null:
+		return
+	var current_tick: int = game_state.current_tick
+	var lines: Array[String] = ["[b]Alerts[/b]"]
+	var visible_alerts: Array[Dictionary] = []
+	for alert in _presentation_alerts:
+		var age: int = current_tick - int(alert.get("tick", current_tick))
+		if age <= 220:
+			visible_alerts.append(alert)
+	while visible_alerts.size() > 4:
+		visible_alerts.remove_at(0)
+	for alert in visible_alerts:
+		var kind: String = str(alert.get("kind", "info"))
+		var color: String = "lightgray"
+		if kind == "warning":
+			color = "khaki"
+		elif kind == "danger":
+			color = "tomato"
+		elif kind == "success":
+			color = "lightgreen"
+		lines.append("[color=%s]%s[/color]" % [color, str(alert.get("text", ""))])
+	alert_label.text = "\n".join(lines)
+
+
+func _pull_scenario_alerts() -> void:
+	var alerts_value: Variant = game_state.scenario_state.get("alerts", [])
+	if not (alerts_value is Array):
+		return
+	var alerts: Array = alerts_value
+	while _shown_scenario_alert_count < alerts.size():
+		var alert_value: Variant = alerts[_shown_scenario_alert_count]
+		if alert_value is Dictionary:
+			_presentation_alerts.append((alert_value as Dictionary).duplicate(true))
+		_shown_scenario_alert_count += 1
+
+
+func _pull_local_state_alerts() -> void:
+	var entity_ids: Array = game_state.entities.keys()
+	entity_ids.sort()
+	for entity_id in entity_ids:
+		var entity: Dictionary = game_state.get_entity_dict(entity_id)
+		var entity_type: String = game_state.get_entity_type(entity)
+		if entity_type != "structure" and entity_type != "stockpile":
+			continue
+		var is_constructed: bool = game_state.get_entity_is_constructed(entity)
+		if _last_structure_constructed.has(entity_id):
+			var previous_constructed: bool = bool(_last_structure_constructed[entity_id])
+			if not previous_constructed and is_constructed and game_state.get_entity_owner_id(entity, 0) == 1:
+				_push_local_alert("success", "%s complete." % _get_structure_display_name(entity))
+		_last_structure_constructed[entity_id] = is_constructed
+
+		if game_state.get_entity_owner_id(entity, 0) != 1:
+			continue
+		var hp: int = game_state.get_entity_hp(entity)
+		var previous_hp: int = hp
+		if _last_player_hp.has(entity_id):
+			previous_hp = int(_last_player_hp[entity_id])
+		if hp < previous_hp and game_state.current_tick - _last_attack_alert_tick >= 20:
+			_push_local_alert("danger", "%s under attack." % _get_structure_display_name(entity))
+			_last_attack_alert_tick = game_state.current_tick
+		_last_player_hp[entity_id] = hp
+
+
+func _push_local_alert(kind: String, text: String) -> void:
+	_presentation_alerts.append({
+		"tick": game_state.current_tick,
+		"kind": kind,
+		"text": text,
+	})
+	if _alert_player != null and _alert_player.stream != null:
+		_alert_player.play()
+	while _presentation_alerts.size() > 12:
+		_presentation_alerts.remove_at(0)
+
+
+func _get_scenario_objectives() -> Array[Dictionary]:
+	var objectives: Array[Dictionary] = []
+	var value: Variant = game_state.scenario_state.get("objectives", [])
+	if not (value is Array):
+		return objectives
+	for item in value:
+		if item is Dictionary:
+			objectives.append((item as Dictionary).duplicate(true))
+	return objectives
+
+
+func _get_structure_display_name(entity: Dictionary) -> String:
+	var entity_type: String = game_state.get_entity_type(entity)
+	if entity_type == "stockpile":
+		return "Base"
+	return GameDefinitionsClass.get_structure_display_name(
+		game_state.get_entity_structure_type(entity)
+	)
+
+
 func _create_endgame_overlay() -> void:
 	endgame_overlay = ColorRect.new()
 	endgame_overlay.color = Color(0.05, 0.05, 0.08, 0.72)
@@ -487,6 +737,9 @@ func _create_endgame_overlay() -> void:
 	endgame_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	endgame_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	endgame_label.add_theme_font_size_override("font_size", 52)
+	var ui_font: FontFile = AssetCatalogClass.get_font()
+	if ui_font != null:
+		endgame_label.add_theme_font_override("font", ui_font)
 	endgame_label.set_anchors_preset(Control.PRESET_FULL_RECT)
 	endgame_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	endgame_label.visible = false
@@ -519,25 +772,9 @@ func _get_blocked_cell_count() -> int:
 	return game_state.get_blocked_cells().size()
 
 
-func _build_blocked_cells() -> Dictionary:
+func _build_blocked_cells_from_config() -> Dictionary:
 	var blocked_cells: Dictionary = {}
-	var cells: Array[Vector2i] = [
-		Vector2i(2, 2),
-		Vector2i(8, 3),
-		Vector2i(8, 4),
-		Vector2i(8, 5),
-		Vector2i(8, 6),
-		Vector2i(11, 7),
-		Vector2i(12, 7),
-		Vector2i(13, 7),
-		Vector2i(13, 8),
-		Vector2i(13, 9),
-		Vector2i(15, 4),
-		Vector2i(15, 5),
-		Vector2i(5, 11),
-		Vector2i(6, 11),
-	]
-	for cell in cells:
+	for cell in _match_config.blocked_cells:
 		blocked_cells["%d,%d" % [cell.x, cell.y]] = true
 	return blocked_cells
 

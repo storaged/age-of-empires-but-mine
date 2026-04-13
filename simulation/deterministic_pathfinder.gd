@@ -108,3 +108,52 @@ static func find_path_to_adjacent_target(
 			best_path = candidate_path
 
 	return best_path
+
+
+static func find_nearest_valid_unit_spawn_cell(
+	game_state: GameState,
+	requested_cell: Vector2i
+) -> Vector2i:
+	return _find_nearest_valid_cell(
+		game_state,
+		requested_cell,
+		func(candidate_cell: Vector2i) -> bool:
+			return game_state.is_cell_valid_for_unit_spawn(candidate_cell)
+	)
+
+
+static func find_nearest_valid_structure_cell(
+	game_state: GameState,
+	requested_cell: Vector2i
+) -> Vector2i:
+	return _find_nearest_valid_cell(
+		game_state,
+		requested_cell,
+		func(candidate_cell: Vector2i) -> bool:
+			return game_state.is_cell_valid_for_structure_spawn(candidate_cell)
+	)
+
+
+static func _find_nearest_valid_cell(
+	game_state: GameState,
+	requested_cell: Vector2i,
+	validator: Callable
+) -> Vector2i:
+	var best_cell: Vector2i = INVALID_CELL
+	var best_distance: int = 999999
+	for y in range(game_state.get_map_height()):
+		for x in range(game_state.get_map_width()):
+			var candidate_cell: Vector2i = Vector2i(x, y)
+			if not validator.call(candidate_cell):
+				continue
+			var distance: int = absi(candidate_cell.x - requested_cell.x) + absi(candidate_cell.y - requested_cell.y)
+			if distance < best_distance:
+				best_distance = distance
+				best_cell = candidate_cell
+				continue
+			if distance == best_distance:
+				if candidate_cell.y < best_cell.y:
+					best_cell = candidate_cell
+				elif candidate_cell.y == best_cell.y and candidate_cell.x < best_cell.x:
+					best_cell = candidate_cell
+	return best_cell

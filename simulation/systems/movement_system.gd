@@ -22,6 +22,8 @@ const TRAFFIC_PRIORITY_BY_TASK: Dictionary = {
 	"idle": 4,
 }
 const REPATH_AFTER_WAIT_TICKS: int = 3
+const STALE_INTENT_AFTER_WAIT_TICKS: int = 8
+const MAX_IDLE_VACATE_RADIUS: int = 4
 
 
 func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], _tick: int) -> void:
@@ -37,13 +39,44 @@ func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], 
 		entity["traffic_state"] = ""
 
 		if not game_state.get_entity_has_move_target(entity):
+			if _should_idle_unit_vacate(game_state, entity):
+				if _assign_idle_vacate_path(game_state, entity):
+					game_state.entities[entity_id] = entity
+					var vacate_path_cells: Array[Vector2i] = game_state.get_entity_path_cells(entity)
+					var vacate_current_cell: Vector2i = game_state.get_entity_grid_position(entity)
+					if not vacate_path_cells.is_empty():
+						intents_by_id[entity_id] = {
+							"entity_id": entity_id,
+							"current_cell": vacate_current_cell,
+							"next_cell": vacate_path_cells[0],
+							"priority": _movement_priority(game_state, entity),
+						}
+						ordered_intent_ids.append(entity_id)
+					continue
 			entity["movement_wait_ticks"] = 0
 			game_state.entities[entity_id] = entity
 			continue
 
 		var path_cells: Array[Vector2i] = game_state.get_entity_path_cells(entity)
 		var current_cell: Vector2i = game_state.get_entity_grid_position(entity)
+		if _path_requires_recovery(game_state, current_cell, path_cells):
+			_try_recompute_path(game_state, entity, current_cell)
+			path_cells = game_state.get_entity_path_cells(entity)
 		if path_cells.is_empty():
+			var target_cell: Vector2i = game_state.get_entity_move_target(entity, current_cell)
+			if game_state.get_entity_has_move_target(entity) and current_cell != target_cell:
+				if _should_abandon_move_intent(entity) and game_state.get_entity_movement_wait_ticks(entity) >= STALE_INTENT_AFTER_WAIT_TICKS:
+					entity["has_move_target"] = false
+					entity["move_target"] = current_cell
+					entity["worker_task_state"] = "idle"
+					entity["interaction_slot_cell"] = Vector2i(-1, -1)
+					entity["traffic_state"] = "stale_intent"
+					game_state.entities[entity_id] = entity
+					continue
+				entity["traffic_state"] = "stale_intent"
+				entity["movement_wait_ticks"] = game_state.get_entity_movement_wait_ticks(entity) + 1
+				game_state.entities[entity_id] = entity
+				continue
 			entity["has_move_target"] = false
 			entity["move_target"] = current_cell
 			entity["traffic_state"] = "arrived"
@@ -89,6 +122,10 @@ func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], 
 			if reserved_cells.has(next_key):
 				var occupied_by_value: Variant = reserved_cells[next_key]
 				if occupied_by_value is int and occupied_by_value != entity_id:
+					var blocker_entity: Dictionary = game_state.get_entity_dict(occupied_by_value)
+					var moving_entity: Dictionary = game_state.get_entity_dict(entity_id)
+					if _blocker_should_vacate(game_state, moving_entity, blocker_entity, current_cell):
+						_request_idle_vacate(game_state, blocker_entity)
 					continue
 			reserved_cells.erase(current_key)
 			reserved_cells[next_key] = entity_id
@@ -204,9 +241,21 @@ func _maybe_recompute_path(
 
 	var wait_ticks: int = game_state.get_entity_movement_wait_ticks(entity) + 1
 	entity["movement_wait_ticks"] = wait_ticks
+	if wait_ticks >= STALE_INTENT_AFTER_WAIT_TICKS:
+		entity["traffic_state"] = "stale_intent"
 	if wait_ticks < REPATH_AFTER_WAIT_TICKS:
 		return
+	_try_recompute_path(game_state, entity, current_cell)
 
+
+func _try_recompute_path(game_state: GameState, entity: Dictionary, current_cell: Vector2i) -> void:
+	var target_cell: Vector2i = game_state.get_entity_move_target(entity, current_cell)
+	if current_cell == target_cell:
+		entity["movement_wait_ticks"] = 0
+		return
+
+	var old_path_cells: Array[Vector2i] = game_state.get_entity_path_cells(entity)
+	var old_next_cell: Vector2i = old_path_cells[0] if not old_path_cells.is_empty() else Vector2i(-1, -1)
 	var path_cells: Array[Vector2i] = DeterministicPathfinderClass.find_path(
 		game_state, current_cell, target_cell, true
 	)
@@ -217,8 +266,30 @@ func _maybe_recompute_path(
 
 	entity["path_cells"] = path_cells
 	entity["has_move_target"] = true
-	entity["movement_wait_ticks"] = 0
-	entity["traffic_state"] = "repathing"
+	var wait_ticks: int = game_state.get_entity_movement_wait_ticks(entity)
+	var new_next_cell: Vector2i = path_cells[0] if not path_cells.is_empty() else Vector2i(-1, -1)
+	if wait_ticks >= STALE_INTENT_AFTER_WAIT_TICKS and new_next_cell == old_next_cell:
+		entity["traffic_state"] = "stale_intent"
+	else:
+		entity["traffic_state"] = "repathing"
+		entity["movement_wait_ticks"] = mini(wait_ticks, REPATH_AFTER_WAIT_TICKS)
+
+
+func _path_requires_recovery(
+	game_state: GameState,
+	current_cell: Vector2i,
+	path_cells: Array[Vector2i]
+) -> bool:
+	if path_cells.is_empty():
+		return false
+	var previous_cell: Vector2i = current_cell
+	for path_cell in path_cells:
+		if game_state.is_cell_blocked(path_cell):
+			return true
+		if not game_state.are_cells_adjacent(previous_cell, path_cell):
+			return true
+		previous_cell = path_cell
+	return false
 
 
 func _build_wait_reason(game_state: GameState, intent: Dictionary, start_occupancy: Dictionary) -> String:
@@ -239,6 +310,8 @@ func _build_wait_reason(game_state: GameState, intent: Dictionary, start_occupan
 
 func _movement_priority(game_state: GameState, entity: Dictionary) -> int:
 	var task_state: String = game_state.get_entity_task_state(entity)
+	if task_state == "idle" and game_state.get_entity_has_move_target(entity):
+		return 5
 	if TRAFFIC_PRIORITY_BY_TASK.has(task_state):
 		var priority_value: Variant = TRAFFIC_PRIORITY_BY_TASK[task_state]
 		if priority_value is int:
@@ -288,3 +361,69 @@ func _copy_dictionary(source: Dictionary) -> Dictionary:
 	for key in source.keys():
 		copied[key] = source[key]
 	return copied
+
+
+func _should_abandon_move_intent(entity: Dictionary) -> bool:
+	var task_state_value: Variant = entity.get("worker_task_state", "idle")
+	if not (task_state_value is String):
+		return false
+	var task_state: String = task_state_value
+	return task_state == "idle" or task_state == "to_rally"
+
+
+func _should_idle_unit_vacate(game_state: GameState, entity: Dictionary) -> bool:
+	if game_state.get_entity_task_state(entity) != "idle":
+		return false
+	var current_cell: Vector2i = game_state.get_entity_grid_position(entity)
+	return game_state.is_service_cell(current_cell)
+
+
+func _assign_idle_vacate_path(game_state: GameState, entity: Dictionary) -> bool:
+	var current_cell: Vector2i = game_state.get_entity_grid_position(entity)
+	var parking_cell: Vector2i = game_state.get_nearest_parking_cell(current_cell, MAX_IDLE_VACATE_RADIUS)
+	if parking_cell == current_cell:
+		entity["traffic_state"] = "yielding"
+		return false
+	var path_cells: Array[Vector2i] = DeterministicPathfinderClass.find_path(
+		game_state, current_cell, parking_cell, true
+	)
+	if path_cells.is_empty():
+		path_cells = DeterministicPathfinderClass.find_path(game_state, current_cell, parking_cell, false)
+	if path_cells.is_empty():
+		entity["traffic_state"] = "yielding"
+		return false
+	entity["move_target"] = parking_cell
+	entity["has_move_target"] = true
+	entity["path_cells"] = path_cells
+	entity["traffic_state"] = "vacating"
+	entity["movement_wait_ticks"] = 0
+	return true
+
+
+func _blocker_should_vacate(
+	game_state: GameState,
+	moving_entity: Dictionary,
+	blocker_entity: Dictionary,
+	requested_cell: Vector2i
+) -> bool:
+	var moving_owner: int = game_state.get_entity_owner_id(moving_entity)
+	if moving_owner <= 0:
+		return false
+	if moving_owner != game_state.get_entity_owner_id(blocker_entity):
+		return false
+	if game_state.get_entity_task_state(blocker_entity) != "idle":
+		return false
+	if game_state.get_entity_has_move_target(blocker_entity):
+		return false
+	var blocker_cell: Vector2i = game_state.get_entity_grid_position(blocker_entity)
+	if blocker_cell != requested_cell:
+		return false
+	return game_state.is_service_cell(blocker_cell)
+
+
+func _request_idle_vacate(game_state: GameState, blocker_entity: Dictionary) -> void:
+	var blocker_id: int = game_state.get_entity_id(blocker_entity)
+	if blocker_id == 0:
+		return
+	if _assign_idle_vacate_path(game_state, blocker_entity):
+		game_state.entities[blocker_id] = blocker_entity

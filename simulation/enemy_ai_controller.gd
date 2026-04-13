@@ -31,6 +31,16 @@ func configure(cfg: MatchConfigClass) -> void:
 	_min_attackers_per_wave = cfg.ai_min_attackers_per_wave
 
 
+func get_timing_config() -> Dictionary:
+	return {
+		"production_start_tick": _production_start_tick,
+		"production_interval_ticks": _production_interval_ticks,
+		"attack_start_tick": _attack_start_tick,
+		"attack_wave_interval_ticks": _attack_wave_interval_ticks,
+		"min_attackers_per_wave": _min_attackers_per_wave,
+	}
+
+
 func build_commands_for_tick(game_state: GameState, scheduled_tick: int) -> Array[SimulationCommand]:
 	if game_state.win_condition_met or game_state.lose_condition_met:
 		return []

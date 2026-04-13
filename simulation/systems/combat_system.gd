@@ -5,6 +5,7 @@ const AttackCommandClass = preload("res://commands/attack_command.gd")
 const AttackMoveCommandClass = preload("res://commands/attack_move_command.gd")
 const DeterministicPathfinderClass = preload("res://simulation/deterministic_pathfinder.gd")
 const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
+const TASK_REVALIDATE_WAIT_TICKS: int = 6
 
 
 func apply(game_state: GameState, commands_for_tick: Array[SimulationCommand], _tick: int) -> void:
@@ -82,8 +83,7 @@ func _update_attack_moving(game_state: GameState, entity_id: int, attacker: Dict
 		game_state.entities[entity_id] = attacker
 		return
 
-	# Repath when path runs out mid-move.
-	if game_state.get_entity_path_cells(attacker).is_empty():
+	if _attacker_requires_revalidation(game_state, attacker):
 		var path: Array[Vector2i] = _find_path_avoid_occupied(game_state, attacker_cell, dest)
 		if path.is_empty():
 			_set_attacker_idle(attacker)
@@ -185,6 +185,15 @@ func _update_attacking_unit(game_state: GameState, entity_id: int, attacker: Dic
 	var interaction_slot: Vector2i = game_state.get_entity_interaction_slot_cell(attacker)
 
 	if task == "to_target":
+		if _attacker_requires_revalidation(game_state, attacker) or _attack_slot_invalid(
+			game_state,
+			attacker_cell,
+			interaction_slot,
+			target_cell,
+			attack_range
+		):
+			_assign_attack_path(game_state, entity_id, attacker, target_id)
+			return
 		if in_attack_range and (interaction_slot == Vector2i(-1, -1) or attacker_cell == interaction_slot):
 			attacker["worker_task_state"] = "attacking"
 			attacker["attack_cooldown_remaining"] = 0
@@ -198,6 +207,10 @@ func _update_attacking_unit(game_state: GameState, entity_id: int, attacker: Dic
 
 	# task == "attacking"
 	if not in_attack_range:
+		attacker["worker_task_state"] = "to_target"
+		_assign_attack_path(game_state, entity_id, attacker, target_id)
+		return
+	if _attacker_requires_revalidation(game_state, attacker):
 		attacker["worker_task_state"] = "to_target"
 		_assign_attack_path(game_state, entity_id, attacker, target_id)
 		return
@@ -250,7 +263,14 @@ func _assign_attack_path(
 		game_state.entities[entity_id] = attacker
 		return
 
-	var slot_cell: Vector2i = _find_attack_position(game_state, target_cell, attacker_cell, attack_range)
+	var slot_cell: Vector2i = _find_attack_position(
+		game_state,
+		target_id,
+		entity_id,
+		target_cell,
+		attacker_cell,
+		attack_range
+	)
 	if slot_cell == Vector2i(-1, -1):
 		_set_attacker_idle(attacker)
 		game_state.entities[entity_id] = attacker
@@ -267,6 +287,8 @@ func _assign_attack_path(
 
 func _find_attack_position(
 	game_state: GameState,
+	target_id: int,
+	attacker_id: int,
 	target_cell: Vector2i,
 	attacker_cell: Vector2i,
 	attack_range: int
@@ -275,9 +297,53 @@ func _find_attack_position(
 	if candidate_cells.is_empty():
 		return Vector2i(-1, -1)
 
+	var attacker_ids: Array[int] = _get_attacker_ids_for_target(game_state, target_id, attacker_id)
+	var claimed_cells: Array[Vector2i] = []
+	for next_attacker_id in attacker_ids:
+		var next_attacker: Dictionary = game_state.get_entity_dict(next_attacker_id)
+		var next_attacker_cell: Vector2i = game_state.get_entity_grid_position(next_attacker)
+		var best_cell: Vector2i = _find_best_attack_cell(
+			game_state,
+			candidate_cells,
+			claimed_cells,
+			next_attacker_cell
+		)
+		if next_attacker_id == attacker_id:
+			return best_cell
+		if best_cell != Vector2i(-1, -1):
+			claimed_cells.append(best_cell)
+	return Vector2i(-1, -1)
+
+
+func _get_attacker_ids_for_target(game_state: GameState, target_id: int, attacker_id: int) -> Array[int]:
+	var attacker_ids: Array[int] = []
+	for entity_id in game_state.get_entities_by_type("unit"):
+		var entity: Dictionary = game_state.get_entity_dict(entity_id)
+		if not game_state.get_entity_can_attack(entity):
+			continue
+		if game_state.get_entity_attack_target_id(entity) != target_id:
+			continue
+		var task_state: String = game_state.get_entity_task_state(entity)
+		if task_state != "to_target" and task_state != "attacking":
+			continue
+		attacker_ids.append(entity_id)
+	if not attacker_ids.has(attacker_id):
+		attacker_ids.append(attacker_id)
+	attacker_ids.sort()
+	return attacker_ids
+
+
+func _find_best_attack_cell(
+	game_state: GameState,
+	candidate_cells: Array[Vector2i],
+	claimed_cells: Array[Vector2i],
+	attacker_cell: Vector2i
+) -> Vector2i:
 	var best_cell: Vector2i = Vector2i(-1, -1)
 	var best_path_length: int = 999999
 	for candidate_cell in candidate_cells:
+		if claimed_cells.has(candidate_cell):
+			continue
 		var path: Array[Vector2i] = _find_path_avoid_occupied(game_state, attacker_cell, candidate_cell)
 		if path.is_empty() and attacker_cell != candidate_cell:
 			continue
@@ -287,21 +353,21 @@ func _find_attack_position(
 			best_path_length = path_length
 		elif path_length == best_path_length and _is_cell_before(candidate_cell, best_cell, attacker_cell):
 			best_cell = candidate_cell
-
 	if best_cell != Vector2i(-1, -1):
 		return best_cell
-
 	for candidate_cell in candidate_cells:
+		if claimed_cells.has(candidate_cell):
+			continue
 		var fallback_path: Array[Vector2i] = DeterministicPathfinderClass.find_path(
 			game_state, attacker_cell, candidate_cell, false
 		)
 		if fallback_path.is_empty() and attacker_cell != candidate_cell:
 			continue
-		var path_length: int = fallback_path.size()
-		if best_cell == Vector2i(-1, -1) or path_length < best_path_length:
+		var fallback_length: int = fallback_path.size()
+		if best_cell == Vector2i(-1, -1) or fallback_length < best_path_length:
 			best_cell = candidate_cell
-			best_path_length = path_length
-		elif path_length == best_path_length and _is_cell_before(candidate_cell, best_cell, attacker_cell):
+			best_path_length = fallback_length
+		elif fallback_length == best_path_length and _is_cell_before(candidate_cell, best_cell, attacker_cell):
 			best_cell = candidate_cell
 	return best_cell
 
@@ -347,6 +413,8 @@ func _kill_entity(game_state: GameState, entity_id: int, entity: Dictionary) -> 
 		var cell: Vector2i = game_state.get_entity_grid_position(entity)
 		game_state.occupancy.erase(game_state.cell_key(cell))
 	game_state.entities.erase(entity_id)
+	if entity_type == "stockpile" or entity_type == "structure" or entity_type == "resource_node":
+		game_state.rebuild_static_blocker_cache()
 
 
 func _set_attacker_idle(attacker: Dictionary) -> void:
@@ -358,6 +426,8 @@ func _set_attacker_idle(attacker: Dictionary) -> void:
 	attacker["path_cells"] = []
 	attacker["has_move_target"] = false
 	attacker["interaction_slot_cell"] = Vector2i(-1, -1)
+	attacker["movement_wait_ticks"] = 0
+	attacker["traffic_state"] = ""
 
 	# Resume attack-move toward destination if one is still active.
 	var attack_move_dest: Vector2i = Vector2i(-1, -1)
@@ -401,3 +471,26 @@ func _is_cell_before(left: Vector2i, right: Vector2i, attacker_cell: Vector2i) -
 	if left.y != right.y:
 		return left.y < right.y
 	return left.x < right.x
+
+
+func _attacker_requires_revalidation(game_state: GameState, attacker: Dictionary) -> bool:
+	var traffic_state: String = game_state.get_entity_string(attacker, "traffic_state", "")
+	if traffic_state == "stale_intent":
+		return true
+	return game_state.get_entity_movement_wait_ticks(attacker) >= TASK_REVALIDATE_WAIT_TICKS
+
+
+func _attack_slot_invalid(
+	game_state: GameState,
+	attacker_cell: Vector2i,
+	slot_cell: Vector2i,
+	target_cell: Vector2i,
+	attack_range: int
+) -> bool:
+	if slot_cell == Vector2i(-1, -1):
+		return true
+	if attacker_cell == slot_cell:
+		return not _is_cell_in_attack_range(attacker_cell, target_cell, attack_range)
+	if not _is_cell_in_attack_range(slot_cell, target_cell, attack_range):
+		return true
+	return not game_state.is_cell_walkable(slot_cell)
