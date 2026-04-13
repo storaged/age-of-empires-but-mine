@@ -5,6 +5,7 @@ extends Node2D
 
 const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const VisibilityClass = preload("res://simulation/visibility.gd")
+const MatchConfigClass = preload("res://simulation/match_config.gd")
 
 var game_state: GameState
 var client_state: ClientState
@@ -46,11 +47,18 @@ var enemy_structure_color: Color = Color("#c93a1a")
 func configure(
 	initial_game_state: GameState,
 	initial_client_state: ClientState,
-	initial_cell_size: int
+	initial_cell_size: int,
+	cfg: MatchConfigClass = null
 ) -> void:
 	game_state = initial_game_state
 	client_state = initial_client_state
 	cell_size = initial_cell_size
+	if cfg != null:
+		soldier_color = cfg.player_soldier_color
+		unit_color = cfg.player_unit_color
+		archer_color = cfg.player_archer_color
+		enemy_unit_color = cfg.enemy_unit_color
+		enemy_structure_color = cfg.enemy_structure_color
 
 
 func _draw() -> void:

@@ -4,16 +4,31 @@ extends RefCounted
 const AttackCommandClass = preload("res://commands/attack_command.gd")
 const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const QueueProductionCommandClass = preload("res://commands/queue_production_command.gd")
+const MatchConfigClass = preload("res://simulation/match_config.gd")
 
+## Default timing constants (normal difficulty). Used by strategic_timing.gd and tests.
 const PRODUCTION_START_TICK: int = 180
 const PRODUCTION_INTERVAL_TICKS: int = 55
 const ATTACK_START_TICK: int = 420
 const ATTACK_WAVE_INTERVAL_TICKS: int = 120
-const MIN_ATTACKERS_PER_WAVE: int = 3
 
 var issuer_id: int = 2
 var controlled_owner_id: int = 2
 var next_sequence_number: int = 0
+
+var _production_start_tick: int = PRODUCTION_START_TICK
+var _production_interval_ticks: int = PRODUCTION_INTERVAL_TICKS
+var _attack_start_tick: int = ATTACK_START_TICK
+var _attack_wave_interval_ticks: int = ATTACK_WAVE_INTERVAL_TICKS
+var _min_attackers_per_wave: int = 3
+
+
+func configure(cfg: MatchConfigClass) -> void:
+	_production_start_tick = cfg.ai_production_start_tick
+	_production_interval_ticks = cfg.ai_production_interval_ticks
+	_attack_start_tick = cfg.ai_attack_start_tick
+	_attack_wave_interval_ticks = cfg.ai_attack_wave_interval_ticks
+	_min_attackers_per_wave = cfg.ai_min_attackers_per_wave
 
 
 func build_commands_for_tick(game_state: GameState, scheduled_tick: int) -> Array[SimulationCommand]:
@@ -27,12 +42,12 @@ func build_commands_for_tick(game_state: GameState, scheduled_tick: int) -> Arra
 
 
 func get_status_text(game_state: GameState) -> String:
-	if game_state.current_tick < PRODUCTION_START_TICK:
+	if game_state.current_tick < _production_start_tick:
 		return "Enemy scouting"
-	if game_state.current_tick < ATTACK_START_TICK:
+	if game_state.current_tick < _attack_start_tick:
 		return "Enemy mobilizing"
 	if _is_wave_tick(game_state.current_tick):
-		if _count_enemy_attackers(game_state) >= MIN_ATTACKERS_PER_WAVE:
+		if _count_enemy_attackers(game_state) >= _min_attackers_per_wave:
 			return "Enemy wave advancing"
 		return "Enemy regrouping"
 	return "Enemy pressure active"
@@ -40,7 +55,7 @@ func get_status_text(game_state: GameState) -> String:
 
 func _build_production_commands(game_state: GameState, scheduled_tick: int) -> Array[SimulationCommand]:
 	var commands: Array[SimulationCommand] = []
-	if game_state.current_tick < PRODUCTION_START_TICK:
+	if game_state.current_tick < _production_start_tick:
 		return commands
 	if not _is_production_tick(game_state.current_tick):
 		return commands
@@ -75,11 +90,11 @@ func _build_production_commands(game_state: GameState, scheduled_tick: int) -> A
 
 func _build_attack_commands(game_state: GameState, scheduled_tick: int) -> Array[SimulationCommand]:
 	var commands: Array[SimulationCommand] = []
-	if game_state.current_tick < ATTACK_START_TICK:
+	if game_state.current_tick < _attack_start_tick:
 		return commands
 	if not _is_wave_tick(game_state.current_tick):
 		return commands
-	if _count_enemy_attackers(game_state) < MIN_ATTACKERS_PER_WAVE:
+	if _count_enemy_attackers(game_state) < _min_attackers_per_wave:
 		return commands
 
 	var player_base_id: int = _find_player_stockpile_id(game_state)
@@ -123,14 +138,14 @@ func _count_enemy_attackers(game_state: GameState) -> int:
 
 
 func _is_production_tick(current_tick: int) -> bool:
-	return current_tick >= PRODUCTION_START_TICK and (
-		(current_tick - PRODUCTION_START_TICK) % PRODUCTION_INTERVAL_TICKS == 0
+	return current_tick >= _production_start_tick and (
+		(current_tick - _production_start_tick) % _production_interval_ticks == 0
 	)
 
 
 func _is_wave_tick(current_tick: int) -> bool:
-	return current_tick >= ATTACK_START_TICK and (
-		(current_tick - ATTACK_START_TICK) % ATTACK_WAVE_INTERVAL_TICKS == 0
+	return current_tick >= _attack_start_tick and (
+		(current_tick - _attack_start_tick) % _attack_wave_interval_ticks == 0
 	)
 
 

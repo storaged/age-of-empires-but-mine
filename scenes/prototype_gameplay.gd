@@ -2,6 +2,7 @@ extends Node2D
 
 const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const EnemyAIControllerClass = preload("res://simulation/enemy_ai_controller.gd")
+const MatchConfigClass = preload("res://simulation/match_config.gd")
 const FoodReadinessClass = preload("res://simulation/food_readiness.gd")
 const GameStateClass = preload("res://simulation/game_state.gd")
 const StrategicTimingClass = preload("res://simulation/strategic_timing.gd")
@@ -36,6 +37,8 @@ const CLICK_SELECTION_THRESHOLD: float = 10.0
 @onready var status_label: RichTextLabel = $CanvasLayer/SummaryMargin/SummaryPanel/StatusLabel
 @onready var debug_label: RichTextLabel = $CanvasLayer/DebugMargin/DebugPanel/DebugLabel
 
+var _match_config: MatchConfigClass = null
+
 var game_state: GameState
 var command_buffer: CommandBuffer
 var replay_log: ReplayLog
@@ -49,7 +52,13 @@ var endgame_overlay: ColorRect
 var endgame_label: Label
 var show_debug_overlay: bool = false
 
+func set_match_config(cfg: MatchConfigClass) -> void:
+	_match_config = cfg
+
+
 func _ready() -> void:
+	if _match_config == null:
+		_match_config = MatchConfigClass.new()
 	status_label.bbcode_enabled = true
 	debug_label.bbcode_enabled = true
 	game_state = _create_initial_game_state()
@@ -60,6 +69,7 @@ func _ready() -> void:
 	client_state = ClientStateClass.new()
 	input_handler = InputHandlerClass.new()
 	enemy_ai_controller = EnemyAIControllerClass.new()
+	enemy_ai_controller.configure(_match_config)
 	var systems: Array[SimulationSystem] = []
 	systems.append(BuildCommandSystemClass.new())
 	systems.append(MoveCommandSystemClass.new())
@@ -90,7 +100,7 @@ func _ready() -> void:
 	_apply_camera_to_node()
 	_sync_client_visuals_from_authoritative_state()
 
-	renderer.configure(game_state, client_state, CELL_SIZE)
+	renderer.configure(game_state, client_state, CELL_SIZE, _match_config)
 	renderer.queue_redraw()
 	_refresh_status_label()
 	command_panel.refresh(game_state, client_state)
