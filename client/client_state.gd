@@ -134,6 +134,15 @@ func set_build_indicator(cell: Vector2i) -> void:
 	})
 
 
+func set_rally_indicator(cell: Vector2i, rally_mode: String) -> void:
+	indicators.clear()
+	indicators.append({
+		"type": "rally_target",
+		"cell": cell,
+		"rally_mode": rally_mode,
+	})
+
+
 func set_order_feedback(message: String, was_rejected: bool) -> void:
 	last_order_feedback = message
 	last_order_was_rejected = was_rejected

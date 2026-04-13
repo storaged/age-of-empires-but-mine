@@ -18,6 +18,9 @@ var map_data: Dictionary = {}
 var occupancy: Dictionary = {}
 var resources: Dictionary = {}
 var production_queues: Dictionary = {}
+## Cache of cells blocked by structures, stockpiles, and resource nodes.
+## Eliminates O(entity_count) scan in has_static_blocker_at_cell() during BFS.
+var static_blocker_cells: Dictionary = {}
 
 # Phase 1 smoke-test state. Still authoritative data.
 var debug_counter: int = 0
@@ -62,7 +65,7 @@ func get_entity_dict(entity_id: int) -> Dictionary:
 	if entities.has(entity_id):
 		var entity_value: Variant = entities[entity_id]
 		if entity_value is Dictionary:
-			return entity_value
+			return GameDefinitionsClass.normalize_entity(entity_value)
 	return {}
 
 
@@ -173,11 +176,64 @@ func get_interaction_slot_for_worker(
 	if not worker_ids.has(worker_id):
 		worker_ids.append(worker_id)
 		worker_ids.sort()
-	var worker_index: int = worker_ids.find(worker_id)
-	if worker_index == -1:
-		worker_index = 0
 
-	return interaction_slots[worker_index % interaction_slots.size()]
+	# Greedy nearest-first deconfliction: process workers in sorted id order;
+	# each claims the unclaimed slot nearest to their current position.
+	# Deterministic: id order + nearest-first with (y,x) coord tie-break.
+	var claimed: Array[Vector2i] = []
+	for wid in worker_ids:
+		var wpos: Vector2i = _raw_entity_grid_position(wid)
+		var best: Vector2i = _nearest_unclaimed_slot(interaction_slots, claimed, wpos)
+		if wid == worker_id:
+			return best if best != Vector2i(-1, -1) else interaction_slots[0]
+		if best != Vector2i(-1, -1):
+			claimed.append(best)
+
+	# Fallback: more workers than slots — wrap around unclaimed then claimed.
+	var wpos: Vector2i = _raw_entity_grid_position(worker_id)
+	return _nearest_unclaimed_slot(interaction_slots, [], wpos)
+
+
+## Returns the raw grid_position from an entity dict without normalize overhead.
+func _raw_entity_grid_position(entity_id: int) -> Vector2i:
+	if not entities.has(entity_id):
+		return Vector2i(-1, -1)
+	var raw: Variant = entities[entity_id]
+	if not (raw is Dictionary):
+		return Vector2i(-1, -1)
+	var pos: Variant = (raw as Dictionary).get("grid_position", Vector2i(-1, -1))
+	if pos is Vector2i:
+		return pos
+	return Vector2i(-1, -1)
+
+
+## Returns the unclaimed slot nearest to pos; Vector2i(-1,-1) if all slots claimed.
+## Tie-break: lower y first, then lower x — deterministic.
+func _nearest_unclaimed_slot(
+	slots: Array[Vector2i],
+	claimed: Array[Vector2i],
+	pos: Vector2i
+) -> Vector2i:
+	var best: Vector2i = Vector2i(-1, -1)
+	var best_dist: int = 999999
+	for slot in slots:
+		if claimed.has(slot):
+			continue
+		var dist: int = absi(slot.x - pos.x) + absi(slot.y - pos.y)
+		if pos == Vector2i(-1, -1):
+			dist = 0  # unknown position — treat all as equidistant, pick by coord
+		if dist < best_dist or (dist == best_dist and _slot_before(slot, best)):
+			best = slot
+			best_dist = dist
+	return best
+
+
+func _slot_before(a: Vector2i, b: Vector2i) -> bool:
+	if b == Vector2i(-1, -1):
+		return true
+	if a.y != b.y:
+		return a.y < b.y
+	return a.x < b.x
 
 
 func are_cells_adjacent(left: Vector2i, right: Vector2i) -> bool:
@@ -256,31 +312,27 @@ func get_entity_production_duration_ticks(entity: Dictionary) -> int:
 	return get_entity_int(entity, "production_duration_ticks", 0)
 
 
-func get_entity_grid_position(entity: Dictionary, fallback: Vector2i = Vector2i.ZERO) -> Vector2i:
-	if entity.has("grid_position"):
-		var grid_position_value: Variant = entity["grid_position"]
-		if grid_position_value is Vector2i:
-			return grid_position_value
+func get_entity_vector2i(entity: Dictionary, key: String, fallback: Vector2i) -> Vector2i:
+	if entity.has(key):
+		var vector_value: Variant = entity[key]
+		if vector_value is Vector2i:
+			return vector_value
 	return fallback
+
+
+func get_entity_grid_position(entity: Dictionary, fallback: Vector2i = Vector2i.ZERO) -> Vector2i:
+	return get_entity_vector2i(entity, "grid_position", fallback)
 
 
 func get_entity_move_target(entity: Dictionary, fallback: Vector2i = Vector2i.ZERO) -> Vector2i:
-	if entity.has("move_target"):
-		var move_target_value: Variant = entity["move_target"]
-		if move_target_value is Vector2i:
-			return move_target_value
-	return fallback
+	return get_entity_vector2i(entity, "move_target", fallback)
 
 
 func get_entity_interaction_slot_cell(
 	entity: Dictionary,
 	fallback: Vector2i = Vector2i(-1, -1)
 ) -> Vector2i:
-	if entity.has("interaction_slot_cell"):
-		var interaction_slot_value: Variant = entity["interaction_slot_cell"]
-		if interaction_slot_value is Vector2i:
-			return interaction_slot_value
-	return fallback
+	return get_entity_vector2i(entity, "interaction_slot_cell", fallback)
 
 
 func get_entity_structure_type(entity: Dictionary) -> String:
@@ -291,8 +343,44 @@ func get_entity_produced_unit_type(entity: Dictionary) -> String:
 	return get_entity_string(entity, "produced_unit_type", "")
 
 
+func get_entity_rally_mode(entity: Dictionary) -> String:
+	return get_entity_string(entity, "rally_mode", "")
+
+
+func get_entity_rally_cell(entity: Dictionary) -> Vector2i:
+	return get_entity_vector2i(entity, "rally_cell", Vector2i(-1, -1))
+
+
+func get_entity_rally_target_id(entity: Dictionary) -> int:
+	return get_entity_int(entity, "rally_target_id", 0)
+
+
 func get_entity_resource_type(entity: Dictionary) -> String:
 	return get_entity_string(entity, "resource_type", "")
+
+
+func get_entity_supply_provided(entity: Dictionary) -> int:
+	return get_entity_int(entity, "supply_provided", 0)
+
+
+func get_entity_resource_trickle_type(entity: Dictionary) -> String:
+	return get_entity_string(entity, "resource_trickle_type", "")
+
+
+func get_entity_resource_trickle_amount(entity: Dictionary) -> int:
+	return get_entity_int(entity, "resource_trickle_amount", 0)
+
+
+func get_entity_resource_trickle_interval_ticks(entity: Dictionary) -> int:
+	return get_entity_int(entity, "resource_trickle_interval_ticks", 0)
+
+
+func get_entity_resource_trickle_progress_ticks(entity: Dictionary) -> int:
+	return get_entity_int(entity, "resource_trickle_progress_ticks", 0)
+
+
+func get_entity_population_cost(entity: Dictionary) -> int:
+	return get_entity_int(entity, "population_cost", 0)
 
 
 func get_entity_is_constructed(entity: Dictionary) -> bool:
@@ -301,6 +389,14 @@ func get_entity_is_constructed(entity: Dictionary) -> bool:
 
 func get_entity_is_production_blocked(entity: Dictionary) -> bool:
 	return get_entity_bool(entity, "production_blocked", false)
+
+
+func get_entity_is_gatherable(entity: Dictionary) -> bool:
+	return get_entity_bool(entity, "is_gatherable", false)
+
+
+func get_entity_is_depleted(entity: Dictionary) -> bool:
+	return get_entity_bool(entity, "is_depleted", false)
 
 
 func get_entity_owner_ids_units(owner_id: int) -> Array[int]:
@@ -314,6 +410,10 @@ func get_entity_owner_ids_units(owner_id: int) -> Array[int]:
 
 func get_entity_production_queue_count(entity: Dictionary) -> int:
 	return get_entity_int(entity, "production_queue_count", 0)
+
+
+func get_entity_movement_wait_ticks(entity: Dictionary) -> int:
+	return get_entity_int(entity, "movement_wait_ticks", 0)
 
 
 func get_entity_has_move_target(entity: Dictionary) -> bool:
@@ -356,15 +456,34 @@ func is_cell_occupied_by_unit(cell: Vector2i) -> bool:
 
 
 func has_static_blocker_at_cell(cell: Vector2i) -> bool:
+	return static_blocker_cells.has(cell_key(cell))
+
+
+## Mark a cell as permanently blocked by a static entity (structure/stockpile/resource_node).
+## Call when placing these entities so BFS pathfinding stays O(1) per cell.
+func mark_static_blocker(cell: Vector2i) -> void:
+	static_blocker_cells[cell_key(cell)] = true
+
+
+## Rebuild the static blocker cache from scratch. Call once at game init.
+## Reads entity dicts directly (no normalize_entity) — fast O(entity_count).
+func rebuild_static_blocker_cache() -> void:
+	static_blocker_cells = {}
 	for entity_id in entities.keys():
-		var entity: Dictionary = get_entity_dict(entity_id)
-		var entity_type: String = get_entity_type(entity)
+		var entity_value: Variant = entities[entity_id]
+		if not (entity_value is Dictionary):
+			continue
+		var entity: Dictionary = entity_value
+		var entity_type_value: Variant = entity.get("entity_type", "")
+		if not (entity_type_value is String):
+			continue
+		var entity_type: String = entity_type_value
 		if entity_type != "resource_node" and entity_type != "stockpile" and entity_type != "structure":
 			continue
-		if get_entity_grid_position(entity, Vector2i(-999, -999)) != cell:
+		var pos_value: Variant = entity.get("grid_position", null)
+		if not (pos_value is Vector2i):
 			continue
-		return true
-	return false
+		static_blocker_cells[cell_key(pos_value)] = true
 
 
 func get_active_builder_id_for_structure(structure_id: int) -> int:
@@ -418,6 +537,14 @@ func get_entity_attack_cooldown_remaining(entity: Dictionary) -> int:
 	return get_entity_int(entity, "attack_cooldown_remaining", 0)
 
 
+func get_entity_attack_range_cells(entity: Dictionary) -> int:
+	return get_entity_int(entity, "attack_range_cells", 0)
+
+
+func get_entity_vision_radius(entity: Dictionary) -> int:
+	return get_entity_int(entity, "vision_radius_cells", 0)
+
+
 func get_structure_cost(structure_type: String) -> int:
 	return GameDefinitionsClass.get_building_cost(structure_type)
 
@@ -443,6 +570,30 @@ func can_afford_building(structure_type: String) -> bool:
 		if get_resource_amount(resource_type) < cost:
 			return false
 	return true
+
+
+func get_missing_costs(costs: Dictionary) -> Dictionary:
+	var missing_costs: Dictionary = {}
+	var resource_types: Array = costs.keys()
+	resource_types.sort()
+	for resource_type_variant in resource_types:
+		if not (resource_type_variant is String):
+			continue
+		var resource_type: String = resource_type_variant
+		var cost_value: Variant = costs[resource_type]
+		var cost: int = cost_value if cost_value is int else 0
+		var available: int = get_resource_amount(resource_type)
+		if available < cost:
+			missing_costs[resource_type] = cost - available
+	return missing_costs
+
+
+func get_missing_building_costs(structure_type: String) -> Dictionary:
+	return get_missing_costs(GameDefinitionsClass.get_building_costs(structure_type))
+
+
+func get_missing_production_costs(unit_type: String) -> Dictionary:
+	return get_missing_costs(GameDefinitionsClass.get_unit_production_costs(unit_type))
 
 
 ## Deducts all resource costs for placing a building. Call only after can_afford_building() is true.
@@ -494,10 +645,7 @@ func get_population_used(owner_id: int) -> int:
 		var entity: Dictionary = get_entity_dict(entity_id)
 		if get_entity_owner_id(entity) != owner_id:
 			continue
-		var unit_role: String = get_entity_unit_role(entity)
-		if unit_role == "":
-			continue
-		population_used += GameDefinitionsClass.get_unit_population_cost(unit_role)
+		population_used += get_entity_population_cost(entity)
 	return population_used
 
 
@@ -524,6 +672,10 @@ func get_population_reserved(owner_id: int) -> int:
 	return population_reserved
 
 
+func get_population_queued(owner_id: int) -> int:
+	return maxi(get_population_reserved(owner_id) - get_population_used(owner_id), 0)
+
+
 func get_population_cap(owner_id: int) -> int:
 	var population_cap: int = GameDefinitionsClass.get_base_population_cap()
 	for entity_id in get_entities_by_type("structure"):
@@ -532,8 +684,7 @@ func get_population_cap(owner_id: int) -> int:
 			continue
 		if not get_entity_is_constructed(entity):
 			continue
-		var structure_type: String = get_entity_structure_type(entity)
-		population_cap += GameDefinitionsClass.get_building_supply_provided(structure_type)
+		population_cap += get_entity_supply_provided(entity)
 	return population_cap
 
 
@@ -560,7 +711,15 @@ func deduct_production_cost(unit_type: String) -> void:
 
 ## Returns true if this entity has the fields needed to participate in combat as an attacker.
 func get_entity_can_attack(entity: Dictionary) -> bool:
-	return entity.has("attack_target_id")
+	return get_entity_int(entity, "attack_damage", 0) > 0
+
+
+func get_entity_is_ranged_attacker(entity: Dictionary) -> bool:
+	return get_entity_attack_range_cells(entity) > 1 and get_entity_can_attack(entity)
+
+
+func get_entity_is_damageable(entity: Dictionary) -> bool:
+	return get_entity_max_hp(entity) > 0
 
 
 func get_spawn_cells_around(cell: Vector2i) -> Array[Vector2i]:

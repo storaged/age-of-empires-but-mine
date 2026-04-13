@@ -3,13 +3,16 @@ extends RefCounted
 
 const AssignConstructionCommandClass = preload("res://commands/assign_construction_command.gd")
 const AttackCommandClass = preload("res://commands/attack_command.gd")
+const AttackMoveCommandClass = preload("res://commands/attack_move_command.gd")
 const DeterministicPathfinderClass = preload("res://simulation/deterministic_pathfinder.gd")
+const FoodReadinessClass = preload("res://simulation/food_readiness.gd")
 const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const BuildStructureCommandClass = preload("res://commands/build_structure_command.gd")
 const GatherResourceCommandClass = preload("res://commands/gather_resource_command.gd")
 const MoveUnitCommandClass = preload("res://commands/move_unit_command.gd")
 const QueueProductionCommandClass = preload("res://commands/queue_production_command.gd")
 const ReturnCargoCommandClass = preload("res://commands/return_cargo_command.gd")
+const SetRallyPointCommandClass = preload("res://commands/set_rally_point_command.gd")
 
 ## Converts local input into validated command objects and client-only selection state.
 
@@ -59,6 +62,15 @@ func build_commands_for_world_position(
 	if client_state.selected_entity_ids.is_empty():
 		client_state.set_order_feedback("No units selected.", true)
 		return []
+
+	var rally_commands: Array[SimulationCommand] = _build_rally_commands_for_selection(
+		clamped_target_cell,
+		game_state,
+		client_state,
+		scheduled_tick
+	)
+	if not rally_commands.is_empty():
+		return rally_commands
 
 	var resource_node_id: int = _find_resource_node_id_at_cell(clamped_target_cell, game_state)
 	if resource_node_id != 0:
@@ -119,6 +131,7 @@ func build_commands_for_world_position(
 		client_state.set_invalid_indicator(clamped_target_cell, "Destination unreachable.")
 		return []
 
+	var has_attack_move: bool = false
 	for index in range(target_cells.size()):
 		var unit_id_value: Variant = sorted_unit_ids[index]
 		if not (unit_id_value is int):
@@ -128,20 +141,37 @@ func build_commands_for_world_position(
 		if not (target_cell_value is Vector2i):
 			continue
 		var target_cell: Vector2i = target_cell_value
-		commands.append(
-			MoveUnitCommandClass.new(
-				scheduled_tick,
-				issuer_id,
-				_next_sequence_number(),
-				unit_id,
-				target_cell
+		var entity: Dictionary = game_state.get_entity_dict(unit_id)
+		if game_state.get_entity_can_attack(entity):
+			has_attack_move = true
+			commands.append(
+				AttackMoveCommandClass.new(
+					scheduled_tick,
+					issuer_id,
+					_next_sequence_number(),
+					unit_id,
+					target_cell
+				)
 			)
-		)
+		else:
+			commands.append(
+				MoveUnitCommandClass.new(
+					scheduled_tick,
+					issuer_id,
+					_next_sequence_number(),
+					unit_id,
+					target_cell
+				)
+			)
 
 	client_state.set_move_indicators(target_cells)
 	var carrying_units_selected: bool = _selection_contains_carrying_worker(game_state, client_state)
 	if target_cells.size() == sorted_unit_ids.size():
-		if carrying_units_selected:
+		if has_attack_move and carrying_units_selected:
+			client_state.set_order_feedback("Attack-move accepted. Workers move only.", false)
+		elif has_attack_move:
+			client_state.set_order_feedback("Attack-move accepted.", false)
+		elif carrying_units_selected:
 			client_state.set_order_feedback("Move order accepted. Cargo preserved.", false)
 		else:
 			client_state.set_order_feedback("Move order accepted.", false)
@@ -168,27 +198,29 @@ func build_production_commands_for_selection(
 
 	var produced_unit_type: String = ""
 	if entity_type == "stockpile":
-		produced_unit_type = GameDefinitionsClass.get_stockpile_produces()
+		produced_unit_type = GameDefinitionsClass.get_structure_produces("stockpile")
 	elif entity_type == "structure":
 		if not game_state.get_entity_is_constructed(selected_entity):
 			client_state.set_order_feedback("Building not yet constructed.", true)
 			return []
 		var structure_type: String = game_state.get_entity_structure_type(selected_entity)
-		produced_unit_type = GameDefinitionsClass.get_building_produces(structure_type)
+		produced_unit_type = GameDefinitionsClass.get_structure_produces(structure_type)
 		if produced_unit_type == "":
 			client_state.set_order_feedback("This building cannot produce units.", true)
 			return []
 	else:
-		client_state.set_order_feedback("Select a base or barracks to produce units.", true)
+		client_state.set_order_feedback("Select a producer building to queue units.", true)
 		return []
 
 	if not game_state.can_afford_production(produced_unit_type):
-		var costs_str: String = GameDefinitionsClass.format_costs(
-			GameDefinitionsClass.get_unit_production_costs(produced_unit_type)
-		)
 		var unit_name: String = GameDefinitionsClass.get_unit_display_name(produced_unit_type)
+		var owner_id: int = game_state.get_entity_owner_id(selected_entity, issuer_id)
+		var missing_costs: Dictionary = game_state.get_missing_production_costs(produced_unit_type)
 		client_state.set_order_feedback(
-			"Not enough resources to produce a %s (%s)." % [unit_name.to_lower(), costs_str],
+			"Cannot produce %s. %s." % [
+				unit_name.to_lower(),
+				FoodReadinessClass.build_missing_food_message(game_state, owner_id, missing_costs)
+			],
 			true
 		)
 		return []
@@ -209,6 +241,68 @@ func build_production_commands_for_selection(
 		)
 	)
 	client_state.set_order_feedback("%s production queued." % produced_unit_type.capitalize(), false)
+	return commands
+
+
+func _build_rally_commands_for_selection(
+	target_cell: Vector2i,
+	game_state: GameState,
+	client_state: ClientState,
+	scheduled_tick: int
+) -> Array[SimulationCommand]:
+	if client_state.selected_entity_ids.size() != 1:
+		return []
+
+	var producer_id: int = client_state.selected_entity_ids[0]
+	var producer_entity: Dictionary = game_state.get_entity_dict(producer_id)
+	var producer_type: String = game_state.get_entity_type(producer_entity)
+	if producer_type != "stockpile" and producer_type != "structure":
+		return []
+	if producer_type == "structure" and not game_state.get_entity_is_constructed(producer_entity):
+		return []
+
+	var structure_type: String = game_state.get_entity_structure_type(producer_entity)
+	var produced_unit_type: String = GameDefinitionsClass.get_structure_produces(structure_type)
+	if produced_unit_type == "":
+		return []
+
+	var resource_node_id: int = _find_resource_node_id_at_cell(target_cell, game_state)
+	if resource_node_id != 0:
+		if GameDefinitionsClass.get_unit_role(produced_unit_type) != "worker":
+			client_state.set_invalid_indicator(target_cell, "Only worker producers can rally to resources.")
+			return []
+		var commands: Array[SimulationCommand] = [
+			SetRallyPointCommandClass.new(
+				scheduled_tick,
+				issuer_id,
+				_next_sequence_number(),
+				producer_id,
+				"resource",
+				target_cell,
+				resource_node_id
+			)
+		]
+		client_state.set_rally_indicator(target_cell, "resource")
+		client_state.set_order_feedback("Worker rally set to resource.", false)
+		return commands
+
+	if not game_state.is_cell_walkable(target_cell):
+		client_state.set_invalid_indicator(target_cell, "Invalid rally location.")
+		return []
+
+	var commands: Array[SimulationCommand] = [
+		SetRallyPointCommandClass.new(
+			scheduled_tick,
+			issuer_id,
+			_next_sequence_number(),
+			producer_id,
+			"cell",
+			target_cell,
+			0
+		)
+	]
+	client_state.set_rally_indicator(target_cell, "cell")
+	client_state.set_order_feedback("Rally point updated.", false)
 	return commands
 
 
@@ -593,10 +687,8 @@ func _build_placement_reason(
 		var prereq_name: String = GameDefinitionsClass.get_building_display_name(prereq)
 		return "Requires a completed %s first." % prereq_name
 	if not game_state.can_afford_building(structure_type):
-		var costs_str: String = GameDefinitionsClass.format_costs(
-			GameDefinitionsClass.get_building_costs(structure_type)
-		)
-		return "Not enough resources (%s)." % costs_str
+		var missing_costs: Dictionary = game_state.get_missing_building_costs(structure_type)
+		return "Need %s." % GameDefinitionsClass.format_costs(missing_costs)
 	if game_state.is_cell_occupied_by_unit(target_cell):
 		return "Cannot place on a unit."
 	if game_state.has_static_blocker_at_cell(target_cell):

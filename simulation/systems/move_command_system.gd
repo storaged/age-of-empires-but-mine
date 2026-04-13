@@ -44,6 +44,7 @@ func apply(game_state: GameState, commands_for_tick: Array[SimulationCommand], _
 			if entity.has("attack_target_id"):
 				entity["attack_target_id"] = 0
 				entity["attack_cooldown_remaining"] = 0
+			entity["attack_move_target_cell"] = Vector2i(-1, -1)
 			game_state.entities[move_command.unit_id] = entity
 			continue
 
@@ -59,4 +60,5 @@ func apply(game_state: GameState, commands_for_tick: Array[SimulationCommand], _
 		if entity.has("attack_target_id"):
 			entity["attack_target_id"] = 0
 			entity["attack_cooldown_remaining"] = 0
+		entity["attack_move_target_cell"] = Vector2i(-1, -1)
 		game_state.entities[move_command.unit_id] = entity

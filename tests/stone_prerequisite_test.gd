@@ -10,6 +10,7 @@ const GatherCommandSystemClass = preload("res://simulation/systems/gather_comman
 const MoveCommandSystemClass = preload("res://simulation/systems/move_command_system.gd")
 const MovementSystemClass = preload("res://simulation/systems/movement_system.gd")
 const ProductionSystemClass = preload("res://simulation/systems/production_system.gd")
+const StructureEconomySystemClass = preload("res://simulation/systems/structure_economy_system.gd")
 const WorkerEconomySystemClass = preload("res://simulation/systems/worker_economy_system.gd")
 const CommandBufferClass = preload("res://runtime/command_buffer.gd")
 const ReplayLogClass = preload("res://runtime/replay_log.gd")
@@ -81,6 +82,8 @@ func run_prerequisite_rejection_test() -> Array[String]:
 	# Give enough resources so only prerequisite blocks it.
 	game_state.resources["wood"] = 200
 	game_state.resources["stone"] = 200
+	game_state.resources["food"] = 200
+	game_state.resources["food"] = 200
 
 	var initial_entity_count: int = game_state.entities.size()
 	var build_cmd := BuildStructureCommandClass.new(0, 1, 0, worker_id, "barracks", Vector2i(6, 5))
@@ -110,6 +113,7 @@ func run_prerequisite_chain_test() -> Array[String]:
 
 	game_state.resources["wood"] = 200
 	game_state.resources["stone"] = 200
+	game_state.resources["food"] = 200
 
 	var worker_id: int = game_state.get_entities_by_type("unit")[0]
 
@@ -158,6 +162,7 @@ func run_archery_range_production_test() -> Array[String]:
 
 	game_state.resources["wood"] = 200
 	game_state.resources["stone"] = 200
+	game_state.resources["food"] = 200
 
 	# Inject a completed archery_range.
 	var range_id: int = game_state.allocate_entity_id()
@@ -185,6 +190,7 @@ func run_archery_range_production_test() -> Array[String]:
 
 	var wood_before: int = game_state.get_resource_amount("wood")
 	var stone_before: int = game_state.get_resource_amount("stone")
+	var food_before: int = game_state.get_resource_amount("food")
 
 	var archer_spawned: bool = false
 	for _i in range(60):
@@ -202,6 +208,7 @@ func run_archery_range_production_test() -> Array[String]:
 	var archer_costs: Dictionary = GameDefinitionsClass.get_unit_production_costs("archer")
 	var expected_wood: int = wood_before - _get_cost(archer_costs, "wood")
 	var expected_stone: int = stone_before - _get_cost(archer_costs, "stone")
+	var expected_food: int = food_before - _get_cost(archer_costs, "food")
 	if game_state.get_resource_amount("wood") != expected_wood:
 		failures.append("[archery_prod] Wood not deducted correctly: expected %d got %d" % [
 			expected_wood, game_state.get_resource_amount("wood")
@@ -209,6 +216,10 @@ func run_archery_range_production_test() -> Array[String]:
 	if game_state.get_resource_amount("stone") != expected_stone:
 		failures.append("[archery_prod] Stone not deducted correctly: expected %d got %d" % [
 			expected_stone, game_state.get_resource_amount("stone")
+		])
+	if game_state.get_resource_amount("food") != expected_food:
+		failures.append("[archery_prod] Food not deducted correctly: expected %d got %d" % [
+			expected_food, game_state.get_resource_amount("food")
 		])
 
 	# Verify the spawned unit is an archer.
@@ -251,13 +262,14 @@ func _make_tick_manager(game_state: GameState) -> TickManager:
 	systems.append(CombatSystemClass.new())
 	systems.append(MovementSystemClass.new())
 	systems.append(WorkerEconomySystemClass.new())
+	systems.append(StructureEconomySystemClass.new())
 	systems.append(ProductionSystemClass.new())
 	return TickManagerClass.new(game_state, command_buffer, replay_log, state_hasher, systems)
 
 
 func _create_initial_game_state() -> GameState:
 	var state: GameState = GameStateClass.new()
-	state.resources = {"wood": 0, "stone": 0}
+	state.resources = {"food": 0, "wood": 0, "stone": 0}
 	state.map_data = {
 		"width": MAP_WIDTH,
 		"height": MAP_HEIGHT,

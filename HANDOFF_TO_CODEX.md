@@ -1,190 +1,217 @@
 # Handoff to Codex
 
-Project: Age Of Empires But Mine
-Engine: Godot 4.6.2
-Language: GDScript
+Project: Age Of Empires But Mine  
+Engine: Godot 4.6.2  
+Language: GDScript  
 Repo: storaged/age-of-empires-but-mine
 
-## What This Is
+## What Exists Now
 
-A deterministic RTS prototype built around an authoritative tick-based simulation. All game logic runs in a fixed-step simulation at 10 Hz; rendering reads state but never mutates it. The architecture is designed to support future lockstep multiplayer via state hashing and replay logs.
+This is a deterministic RTS prototype with a real gameplay loop already in place.
 
-## How To Run
+Current implemented slice:
+- authoritative 10 Hz simulation
+- tick-stamped command pipeline
+- replay/state hashing foundation
+- multi-unit selection and movement
+- blocked terrain, occupancy, deterministic BFS pathfinding
+- worker economy for `wood` and `stone`
+- building placement, construction, and prerequisite chain
+- production from stockpile and military buildings
+- combat and enemy attacks
+- deterministic enemy AI with staged opening pressure
+- authoritative win/lose conditions
+- population/supply cap
+- compact HUD + command panel + debug overlay
+- normalized definition-driven entity/stat schema
+
+The main runnable scene is:
 
 ```bash
-# Run the prototype scene
 godot4 scenes/prototype_gameplay.tscn
-
-# Parse-check a file (no window)
-godot4 --headless --check-only --script path/to/file.gd
-
-# Run headless tests
-godot4 --headless --script tests/gather_test.gd
-godot4 --headless --script tests/construction_test.gd
-godot4 --headless --script tests/combat_test.gd
-godot4 --headless --script tests/stone_prerequisite_test.gd
 ```
 
-All 4 test suites currently pass. Run them after every change to simulation logic.
+## How To Verify
 
-## Architecture In One Paragraph
+Use local Godot CLI, not only static inspection.
 
-Input translates to `SimulationCommand` objects. Commands are buffered (tick-stamped) in `CommandBuffer`. `TickManager` advances the simulation at 10 Hz, executing commands at their stamped tick, running all `SimulationSystem` subclasses in order, then hashing the resulting `GameState`. `Renderer` and `CommandPanel` read state but never write it. `ClientState` holds camera/selection/hover — it is entirely separate from simulation state.
+```bash
+HOME=/tmp XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp godot4 --headless --scene res://scenes/prototype_gameplay.tscn --quit-after 2
 
-## Critical Rules — Do Not Violate
-
-1. **Systems only mutate GameState.** Never mutate GameState from input handlers, renderer, or command panel.
-2. **Input produces commands, not mutations.** `input_handler.gd` and `command_panel.gd` emit signals or return `SimulationCommand` objects.
-3. **All content lives in `game_definitions.gd`.** Costs, durations, render colors, spawn templates. Never hardcode these elsewhere.
-4. **Commands are intent only.** They carry parameters (unit ID, target cell, etc.) but never execute logic.
-5. **Client state is never required by simulation.** `GameState` + systems must be runnable headlessly.
-
-## Current Implemented Systems
-
-### Entities
-All entities are plain `Dictionary` in `game_state.entities`. Types: `unit`, `structure`, `stockpile`, `resource_node`.
-
-### Resources
-- Two types: `wood`, `stone`
-- Stored in `game_state.resources: {"wood": int, "stone": int}`
-- Workers gather from resource nodes and deposit at stockpile
-
-### Building Chain
+HOME=/tmp XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp godot4 --headless --script tests/gather_test.gd
+HOME=/tmp XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp godot4 --headless --script tests/construction_test.gd
+HOME=/tmp XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp godot4 --headless --script tests/combat_test.gd
+HOME=/tmp XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp godot4 --headless --script tests/stone_prerequisite_test.gd
+HOME=/tmp XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp godot4 --headless --script tests/ai_winlose_test.gd
+HOME=/tmp XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp godot4 --headless --script tests/population_supply_test.gd
+HOME=/tmp XDG_DATA_HOME=/tmp XDG_CONFIG_HOME=/tmp godot4 --headless --script tests/entity_schema_test.gd
 ```
-house (30W) → barracks (40W) → archery_range (25W 20S)
-```
-- Each requires the previous to be **fully constructed** first
-- Workers build by being assigned via right-click on construction site
-- `is_prerequisite_met(building_type)` on GameState checks for completed structure
 
-### Unit Roster
-| Unit | Trains From | Cost | Role |
-|------|-------------|------|------|
-| Worker | Stockpile | 20W | gather, construct |
-| Soldier | Barracks | 20W | attack |
-| Archer | Archery Range | 15W 10S | attack |
+The recurring `get_system_ca_certificates` macOS warning is a Godot platform warning, not a project parse/load failure.
+
+## Architectural Summary
+
+Input and AI both create `SimulationCommand` objects only. `CommandBuffer` stores commands for execution at a stamped tick. `TickManager` advances the simulation at 10 Hz, collects AI commands for `current_tick + 1`, executes the current tick’s commands, runs systems in deterministic order, then records an authoritative state hash. `GameState` remains headless and authoritative. `ClientState`, `Renderer`, and `CommandPanel` only present state and gather input.
+
+Flow:
+
+```text
+Input / AI
+  -> SimulationCommand
+  -> CommandBuffer (scheduled tick)
+  -> TickManager.advance()
+  -> Simulation systems mutate GameState
+  -> State hash / replay data
+  -> ClientState + Renderer + CommandPanel read-only presentation
+```
+
+## Critical Rules
+
+1. Systems are the only place that mutate `GameState`.
+2. Input/UI/AI produce commands or signals only, never direct simulation mutations.
+3. Content values and default stats live in `simulation/game_definitions.gd`.
+4. `GameState` must stay headless and client-independent.
+5. Determinism depends on stable IDs, stable ordering, fixed tie-breaking, and tick-based execution.
+
+## Current Gameplay Systems
+
+### Economy
+- Resources: `wood`, `stone`
+- Workers gather, carry, return, deposit, and can be redirected without losing cargo
+- Deterministic interaction slots for resource and stockpile approach
+- Simple deterministic deadlock reduction in local worker traffic
+
+### Buildings
+- `stockpile` / base
+- placeable `house`, `barracks`, `archery_range`
+- prerequisite chain:
+  - `house`
+  - `barracks` requires `house`
+  - `archery_range` requires `barracks`
+- workers construct unfinished structures over authoritative ticks
 
 ### Production
-- `QueueProductionCommand(tick, player_id, seq, producer_id, unit_type)` queues training
-- `ProductionSystem` ticks progress, spawns unit adjacent to building when complete
-- `game_state.can_afford_production(unit_type)` + `deduct_production_cost()` for resource checks
+- stockpile trains `worker`
+- barracks trains `soldier`
+- archery range trains `archer`
+- deterministic spawn selection around producers
+- blocked spawn state is surfaced in UI
 
-### Combat
-- Soldiers and archers auto-attack targets assigned via `AttackCommand`
-- `CombatSystem` resolves damage each tick, removes dead entities
-- Enemy dummy units and enemy base exist on the map (static, attackable)
+### Population / Supply
+- base population cap: `5`
+- completed house: `+5` supply
+- unit production uses reserved population gating, not just living count
+- HUD/command panel now expose both current pop and queued/reserved pop where relevant
 
-### Pathfinding
-- `DeterministicPathfinder.find_path(from, to, blocked_cells, occupied_cells, avoid_occupied: bool)`
-- BFS, fully deterministic
-- `avoid_occupied=true` for combat/gather approach; `avoid_occupied=false` for move-to
+### Combat / Win-Lose
+- soldiers and archers attack through `AttackCommand`
+- enemy base destruction => win
+- player stockpile destruction => lose
+- overlay shows `You Win` / `You Lose`
 
-### Movement Stall Recovery
-- `MovementSystem` detects when a unit is "waiting" behind a truly idle blocker
-- Clears the path → forces re-plan next tick with `avoid_occupied=true`
+### Enemy AI
+- pure non-Node controller: `simulation/enemy_ai_controller.gd`
+- uses same command pipeline as player
+- deterministic staged opening:
+  - delayed production start
+  - delayed attack waves
+  - minimum attackers before early aggression
 
-### Command Panel
-- `client/command_panel.gd` — 130px bottom panel
-- Left side: `RichTextLabel` with selection detail (live status, HP, task, construction progress)
-- Right side: up to 8 `Button` slots (4×2 grid), context-sensitive
-- DBG button far right; also F3 key
-- Signals handled by `prototype_gameplay.gd`
+## Normalized Entity / Stat Model
 
-## Controls
+The project still uses authoritative `Dictionary` entities, but schema is now more normalized and definition-driven.
 
-| Input | Action |
-|-------|--------|
-| Left-click | Select unit/building |
-| Drag left | Multi-select box |
-| Right-click ground | Move selected units |
-| Right-click resource node | Gather (workers) |
-| Right-click stockpile | Return cargo (workers) |
-| Right-click enemy | Attack (soldiers/archers) |
-| Right-click construction site | Assign builder (workers) |
-| B | Begin house placement |
-| N | Begin barracks placement |
-| M | Begin archery range placement |
-| Right-click (in placement mode) | Place building |
-| ESC | Cancel placement |
-| Q | Train unit from selected building |
-| WASD | Camera pan |
-| Mouse wheel | Zoom |
-| F3 or DBG button | Toggle debug overlay |
+### Units
+All units now normalize through `GameDefinitions.create_unit_entity(...)` / `normalize_entity(...)` and expose stable fields for:
+- identity/type/owner
+- movement state
+- hp/max_hp
+- attack state
+- population cost
+- worker cargo/task fields where relevant
 
-Command panel build/train buttons are the primary UI; hotkeys are shortcuts.
+Workers now have explicit HP and participate cleanly in the generic damage model.
 
-## GameDefinitions API (most important methods)
+### Structures / Buildings
+Structures and stockpile now normalize through structure helpers and consistently expose:
+- structure type / owner
+- hp / max_hp
+- construction state
+- production state
+- supply provided
 
-```gdscript
-GameDefinitions.get_building_costs("archery_range")          # → {"wood": 25, "stone": 20}
-GameDefinitions.get_building_prerequisite("barracks")         # → "house"
-GameDefinitions.get_building_produces("barracks")             # → "soldier"
-GameDefinitions.get_building_render_colors("barracks")        # → {"base": Color, "inner": Color, "border": Color}
-GameDefinitions.get_unit_production_costs("archer")           # → {"wood": 15, "stone": 10}
-GameDefinitions.format_costs(costs_dict)                      # → "15 wood, 10 stone"
-GameDefinitions.format_costs_short(costs_dict)                # → "15W 10S"
-GameDefinitions.create_unit_entity(type, id, owner, cell, producer_id)  # → ready entity dict
-GameDefinitions.is_known_building_type("barracks")            # → true
-```
+### Resource Nodes
+Resource nodes now normalize and expose:
+- resource type
+- remaining amount
+- max amount
+- gatherable flag
+- depleted flag
 
-## GameState API (most important helpers)
+This gives cleaner extension points for future armor, upgrades, vision, fog of war, or multiplayer serialization work without changing the dictionary-based architecture.
 
-```gdscript
-game_state.can_afford_building("house")         # bool
-game_state.deduct_building_cost("house")        # mutates resources
-game_state.refund_building_cost("house")        # mutates resources
-game_state.can_afford_production("worker")      # bool
-game_state.deduct_production_cost("worker")     # mutates resources
-game_state.is_prerequisite_met("barracks")      # scans entities for completed house
-game_state.get_entity_can_attack(entity)        # bool, checks attack_target_id field
-game_state.get_resource_amount("wood")          # int
-game_state.allocate_entity_id()                 # → next int ID
-```
+## Most Important Files
+
+### Simulation foundation
+- `simulation/game_definitions.gd`
+- `simulation/game_state.gd`
+- `runtime/tick_manager.gd`
+- `runtime/command_buffer.gd`
+
+### Simulation systems
+- `simulation/systems/build_command_system.gd`
+- `simulation/systems/gather_command_system.gd`
+- `simulation/systems/movement_system.gd`
+- `simulation/systems/worker_economy_system.gd`
+- `simulation/systems/production_system.gd`
+- `simulation/systems/combat_system.gd`
+- `simulation/enemy_ai_controller.gd`
+
+### Client / presentation
+- `client/input_handler.gd`
+- `client/command_panel.gd`
+- `client/client_state.gd`
+- `rendering/renderer.gd`
+- `scenes/prototype_gameplay.gd`
+
+## Current UX State
+
+The normal UI now shows:
+- resource totals
+- population summary
+- command-panel build/train buttons with disabled reasons
+- clearer production progress and queue count
+- clearer construction progress and builder state
+- clearer bottleneck feedback such as:
+  - missing wood
+  - missing stone
+  - need more houses
+  - missing prerequisite
+  - no builder assigned
 
 ## Current Known Limitations
 
-1. **No enemy AI.** Enemy units and base exist but are static/passive — they don't move or attack.
-2. **No win/lose condition.** Destroying the enemy base causes entity removal but no game-over screen.
-3. **No lose condition.** Player stockpile has no HP.
-4. **Single player only.** Multiplayer lockstep not yet wired, though architecture supports it.
-5. **Production queue capped at 1.** Only one unit trains at a time per building; queue count stored but not stacked.
-6. **No unit limit.** Houses built but not wired to a population cap mechanic.
-7. **Placement preview cost display** in status_label uses `get_building_cost` (wood-only shorthand); for multi-resource buildings the cost in the top HUD label is incomplete. The command panel buttons show full costs correctly.
+1. No multiplayer / lockstep synchronization yet.
+2. No replay playback UI or save/load yet.
+3. No food/farms, tech tree, upgrades, or civ differentiation.
+4. No fog of war yet.
+5. No advanced building footprints or placement adjacency rules.
+6. Enemy AI is intentionally simple and staged, not strategic.
+7. Combat is functional but still fairly shallow.
 
-## Recommended Next Phase: Enemy AI And Win Condition
+## Best Next Architectural Questions
 
-This is the most impactful next step. The simulation is deterministic and all necessary command types exist.
+If an architect assistant is taking over, the most useful next design discussions are:
 
-**Scope:**
-1. Add an `AIController` (non-Node, pure logic, called by `TickManager` or `prototype_gameplay.gd` each tick)
-2. AI issues real `SimulationCommand` objects (same as player) — `QueueProductionCommand`, `AttackCommand`
-3. Enemy soldiers pathfind toward and attack player stockpile (add HP to stockpile)
-4. Add `win_condition_met: bool` and `lose_condition_met: bool` to `GameState`
-5. `CombatSystem` sets these flags when enemy base or player stockpile HP reaches 0
-6. Simple overlay in `prototype_gameplay.gd` for "You Win" / "You Lose"
+1. how to extend economy depth cleanly
+2. how to deepen combat without breaking determinism
+3. how to evolve the normalized entity schema for future upgrades/vision/fog
+4. when to begin multiplayer/lockstep validation and serialization hardening
 
-**Do not:**
-- Add multiplayer wiring yet
-- Add unit caps / population yet (needs house mechanic)
-- Add tech trees or new building types
+## Current Best Next Work
 
-## File Checklist For New Agents
+Recommended order:
 
-Before modifying simulation logic, read:
-- `simulation/game_definitions.gd` — content model
-- `simulation/game_state.gd` — entity helpers and resource helpers
-- The relevant system in `simulation/systems/`
-
-Before modifying UI, read:
-- `client/command_panel.gd` — panel signals and refresh flow
-- `client/input_handler.gd` — how commands are built from input
-- `scenes/prototype_gameplay.gd` — signal handlers and game loop
-
-After any simulation change:
-```bash
-godot4 --headless --check-only --script [changed_file.gd]
-godot4 --headless --script tests/gather_test.gd
-godot4 --headless --script tests/construction_test.gd
-godot4 --headless --script tests/combat_test.gd
-godot4 --headless --script tests/stone_prerequisite_test.gd
-```
+1. deepen economy / production readability and throughput decisions further if needed
+2. deepen combat and unit interaction depth
+3. only after gameplay loop confidence is high, begin multiplayer/lockstep execution work

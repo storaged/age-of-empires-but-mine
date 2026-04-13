@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(godot4 --headless --check-only)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(godot4 --headless --script tests/gather_test.gd)",
+      "Bash(godot4 --headless --script scenes/smoke_test.gd)",
+      "Bash(godot4:*)"
+    ]
+  }
+}

@@ -2,13 +2,16 @@ extends Node2D
 
 const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const EnemyAIControllerClass = preload("res://simulation/enemy_ai_controller.gd")
+const FoodReadinessClass = preload("res://simulation/food_readiness.gd")
 const GameStateClass = preload("res://simulation/game_state.gd")
+const StrategicTimingClass = preload("res://simulation/strategic_timing.gd")
 const BuildCommandSystemClass = preload("res://simulation/systems/build_command_system.gd")
 const CombatSystemClass = preload("res://simulation/systems/combat_system.gd")
 const GatherCommandSystemClass = preload("res://simulation/systems/gather_command_system.gd")
 const MoveCommandSystemClass = preload("res://simulation/systems/move_command_system.gd")
 const MovementSystemClass = preload("res://simulation/systems/movement_system.gd")
 const ProductionSystemClass = preload("res://simulation/systems/production_system.gd")
+const StructureEconomySystemClass = preload("res://simulation/systems/structure_economy_system.gd")
 const WorkerEconomySystemClass = preload("res://simulation/systems/worker_economy_system.gd")
 const CommandBufferClass = preload("res://runtime/command_buffer.gd")
 const ReplayLogClass = preload("res://runtime/replay_log.gd")
@@ -50,6 +53,7 @@ func _ready() -> void:
 	status_label.bbcode_enabled = true
 	debug_label.bbcode_enabled = true
 	game_state = _create_initial_game_state()
+	game_state.rebuild_static_blocker_cache()
 	command_buffer = CommandBufferClass.new()
 	replay_log = ReplayLogClass.new()
 	state_hasher = StateHasherClass.new()
@@ -63,6 +67,7 @@ func _ready() -> void:
 	systems.append(CombatSystemClass.new())
 	systems.append(MovementSystemClass.new())
 	systems.append(WorkerEconomySystemClass.new())
+	systems.append(StructureEconomySystemClass.new())
 	systems.append(ProductionSystemClass.new())
 	tick_manager = TickManagerClass.new(
 		game_state,
@@ -185,6 +190,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				_on_cancel_placement_requested()
 			else:
 				_on_build_requested("house")
+		elif key_event.keycode == KEY_F:
+			if client_state.is_in_structure_placement_mode():
+				_on_cancel_placement_requested()
+			else:
+				_on_build_requested("farm")
 		elif key_event.keycode == KEY_N:
 			if client_state.is_in_structure_placement_mode():
 				_on_cancel_placement_requested()
@@ -212,6 +222,7 @@ func _unhandled_input(event: InputEvent) -> void:
 func _create_initial_game_state() -> GameState:
 	var state: GameState = GameStateClass.new()
 	state.resources = {
+		"food": 0,
 		"wood": 0,
 		"stone": 0,
 	}
@@ -224,19 +235,11 @@ func _create_initial_game_state() -> GameState:
 
 	var stockpile_cell: Vector2i = Vector2i(2, 2)
 	var stockpile_id: int = state.allocate_entity_id()
-	state.entities[stockpile_id] = {
-		"id": stockpile_id,
-		"entity_type": "stockpile",
-		"owner_id": 1,
-		"grid_position": stockpile_cell,
-		"hp": 60,
-		"max_hp": 60,
-		"production_queue_count": 0,
-		"production_progress_ticks": 0,
-		"production_duration_ticks": 0,
-		"produced_unit_type": "",
-		"production_blocked": false,
-	}
+	state.entities[stockpile_id] = GameDefinitionsClass.create_stockpile_entity(
+		stockpile_id,
+		1,
+		stockpile_cell
+	)
 
 	var wood_cells: Array[Vector2i] = [
 		Vector2i(15, 4),
@@ -244,13 +247,12 @@ func _create_initial_game_state() -> GameState:
 	]
 	for resource_cell in wood_cells:
 		var resource_node_id: int = state.allocate_entity_id()
-		state.entities[resource_node_id] = {
-			"id": resource_node_id,
-			"entity_type": "resource_node",
-			"resource_type": "wood",
-			"grid_position": resource_cell,
-			"remaining_amount": 80,
-		}
+		state.entities[resource_node_id] = GameDefinitionsClass.create_resource_node_entity(
+			"wood",
+			resource_node_id,
+			resource_cell,
+			80
+		)
 
 	var stone_cells: Array[Vector2i] = [
 		Vector2i(5, 11),
@@ -258,74 +260,41 @@ func _create_initial_game_state() -> GameState:
 	]
 	for stone_cell in stone_cells:
 		var stone_node_id: int = state.allocate_entity_id()
-		state.entities[stone_node_id] = {
-			"id": stone_node_id,
-			"entity_type": "resource_node",
-			"resource_type": "stone",
-			"grid_position": stone_cell,
-			"remaining_amount": 60,
-		}
+		state.entities[stone_node_id] = GameDefinitionsClass.create_resource_node_entity(
+			"stone",
+			stone_node_id,
+			stone_cell,
+			60
+		)
 
 	var enemy_base_cell: Vector2i = Vector2i(17, 8)
 	var enemy_base_id: int = state.allocate_entity_id()
-	state.entities[enemy_base_id] = {
-		"id": enemy_base_id,
-		"entity_type": "structure",
-		"structure_type": "enemy_base",
-		"owner_id": 2,
-		"grid_position": enemy_base_cell,
-		"is_constructed": true,
-		"construction_progress_ticks": 0,
-		"construction_duration_ticks": 0,
-		"assigned_builder_id": 0,
-		"hp": 50,
-		"max_hp": 50,
-		"production_queue_count": 0,
-		"production_progress_ticks": 0,
-		"production_duration_ticks": 0,
-		"produced_unit_type": "",
-		"production_blocked": false,
-	}
+	state.entities[enemy_base_id] = GameDefinitionsClass.create_structure_entity(
+		"enemy_base",
+		enemy_base_id,
+		2,
+		enemy_base_cell
+	)
 
 	var enemy_barracks_cell: Vector2i = Vector2i(15, 9)
 	var enemy_barracks_id: int = state.allocate_entity_id()
-	state.entities[enemy_barracks_id] = {
-		"id": enemy_barracks_id,
-		"entity_type": "structure",
-		"structure_type": "barracks",
-		"owner_id": 2,
-		"grid_position": enemy_barracks_cell,
-		"is_constructed": true,
-		"construction_progress_ticks": 0,
-		"construction_duration_ticks": 0,
-		"assigned_builder_id": 0,
-		"hp": 45,
-		"max_hp": 45,
-		"production_queue_count": 0,
-		"production_progress_ticks": 0,
-		"production_duration_ticks": 0,
-		"produced_unit_type": "",
-		"production_blocked": false,
-	}
+	state.entities[enemy_barracks_id] = GameDefinitionsClass.create_structure_entity(
+		"barracks",
+		enemy_barracks_id,
+		2,
+		enemy_barracks_cell
+	)
 
 	var enemy_unit_cells: Array[Vector2i] = [Vector2i(15, 8), Vector2i(16, 10)]
 	for enemy_cell in enemy_unit_cells:
 		var enemy_id: int = state.allocate_entity_id()
-		state.entities[enemy_id] = {
-			"id": enemy_id,
-			"entity_type": "unit",
-			"unit_role": "enemy_dummy",
-			"owner_id": 2,
-			"grid_position": enemy_cell,
-			"move_target": enemy_cell,
-			"path_cells": [],
-			"has_move_target": false,
-			"worker_task_state": "idle",
-			"interaction_slot_cell": Vector2i(-1, -1),
-			"traffic_state": "",
-			"hp": 20,
-			"max_hp": 20,
-		}
+		state.entities[enemy_id] = GameDefinitionsClass.create_unit_entity(
+			"enemy_dummy",
+			enemy_id,
+			2,
+			enemy_cell,
+			0
+		)
 		state.occupancy["%d,%d" % [enemy_cell.x, enemy_cell.y]] = enemy_id
 
 	var starting_cells: Array[Vector2i] = [
@@ -336,29 +305,13 @@ func _create_initial_game_state() -> GameState:
 	]
 	for cell in starting_cells:
 		var unit_id: int = state.allocate_entity_id()
-		state.entities[unit_id] = {
-			"id": unit_id,
-			"entity_type": "unit",
-			"unit_role": "worker",
-			"owner_id": 1,
-			"grid_position": cell,
-			"move_target": cell,
-			"path_cells": [],
-			"has_move_target": false,
-			"worker_task_state": "idle",
-			"assigned_resource_node_id": 0,
-			"assigned_stockpile_id": stockpile_id,
-			"assigned_construction_site_id": 0,
-			"carried_resource_type": "",
-			"carried_amount": 0,
-			"interaction_slot_cell": Vector2i(-1, -1),
-			"traffic_state": "",
-			"carry_capacity": 10,
-			"harvest_amount": 5,
-			"gather_duration_ticks": 8,
-			"deposit_duration_ticks": 2,
-			"gather_progress_ticks": 0,
-		}
+		state.entities[unit_id] = GameDefinitionsClass.create_unit_entity(
+			"worker",
+			unit_id,
+			1,
+			cell,
+			stockpile_id
+		)
 		state.occupancy["%d,%d" % [cell.x, cell.y]] = unit_id
 
 	return state
@@ -424,15 +377,39 @@ func _cell_center_world(cell: Vector2i) -> Vector2:
 func _refresh_status_label() -> void:
 	var lines: Array[String] = []
 	var player_population_used: int = game_state.get_population_used(1)
+	var player_population_queued: int = game_state.get_population_queued(1)
 	var player_population_cap: int = game_state.get_population_cap(1)
+	var strategic_summary: Dictionary = StrategicTimingClass.build_player_summary(game_state, 1)
+	var food_summary: Dictionary = strategic_summary.get("food_summary", {})
+	var timing_state: Dictionary = strategic_summary.get("timing_state", {})
+	var pop_summary: String = "%d / %d" % [player_population_used, player_population_cap]
+	if player_population_queued > 0:
+		pop_summary = "%d + %dQ / %d" % [
+			player_population_used,
+			player_population_queued,
+			player_population_cap,
+		]
 
-	lines.append("[b]Wood:[/b] %d  [b]Stone:[/b] %d  [b]Pop:[/b] %d / %d" % [
+	lines.append("[b]Food:[/b] %d  [b]Wood:[/b] %d  [b]Stone:[/b] %d  [b]Pop:[/b] %s" % [
+		game_state.get_resource_amount("food"),
 		game_state.get_resource_amount("wood"),
 		game_state.get_resource_amount("stone"),
-		player_population_used,
-		player_population_cap,
+		pop_summary,
 	])
-	lines.append("[b]Enemy:[/b] %s" % enemy_ai_controller.get_status_text(game_state))
+	lines.append("[b]Stage:[/b] %s  [color=%s]%s[/color]" % [
+		str(strategic_summary.get("stage_label", "")),
+		str(timing_state.get("color", "lightgreen")),
+		str(timing_state.get("label", "")),
+	])
+	lines.append("[b]Goal:[/b] %s  [b]Bottleneck:[/b] %s" % [
+		str(strategic_summary.get("next_goal", "")),
+		str(strategic_summary.get("bottleneck", "")),
+	])
+	lines.append("[b]Food Flow:[/b] %s" % _format_food_flow_summary(food_summary))
+	lines.append("[b]Enemy:[/b] %s  [b]Pressure:[/b] %s" % [
+		enemy_ai_controller.get_status_text(game_state),
+		StrategicTimingClass.get_enemy_pressure_text(game_state),
+	])
 
 	var feedback: String = client_state.last_order_feedback
 	if feedback != "":
@@ -477,9 +454,9 @@ func _refresh_status_label() -> void:
 	debug_lines.append("")
 	debug_lines.append("[b]Controls:[/b]")
 	debug_lines.append("  LClick: select  Drag: multi-select")
-	debug_lines.append("  RClick ground: move  RClick wood: gather")
+	debug_lines.append("  RClick ground: move  RClick wood/stone: gather")
 	debug_lines.append("  RClick base: deposit  RClick enemy: attack")
-	debug_lines.append("  B/N/M: build house/barracks/archery range  Q: train  ESC: cancel")
+	debug_lines.append("  B/F/N/M: build house/farm/barracks/archery range  Q: train  RClick producer: rally  ESC: cancel")
 	debug_lines.append("  WASD: camera  Wheel: zoom  F3/DBG: debug toggle")
 
 	debug_label.bbcode_enabled = true
@@ -571,20 +548,24 @@ func _on_build_requested(structure_type: String) -> void:
 
 func _on_train_requested(producer_id: int) -> void:
 	var entity: Dictionary = game_state.get_entity_dict(producer_id)
-	var entity_type: String = game_state.get_entity_type(entity)
-	var unit_type: String = ""
-	if entity_type == "stockpile":
-		unit_type = GameDefinitionsClass.get_stockpile_produces()
-	elif entity_type == "structure":
-		unit_type = GameDefinitionsClass.get_building_produces(
-			game_state.get_entity_structure_type(entity)
-		)
+	var unit_type: String = GameDefinitionsClass.get_structure_produces(
+		game_state.get_entity_structure_type(entity)
+	)
 	if unit_type == "":
 		client_state.set_order_feedback("This building cannot produce units.", true)
 		_refresh_status_label()
 		return
 	if not game_state.can_afford_production(unit_type):
-		client_state.set_order_feedback("Not enough resources.", true)
+		var missing_costs: Dictionary = game_state.get_missing_production_costs(unit_type)
+		var owner_id_for_costs: int = game_state.get_entity_owner_id(entity, 1)
+		client_state.set_order_feedback(
+			"%s." % FoodReadinessClass.build_missing_food_message(
+				game_state,
+				owner_id_for_costs,
+				missing_costs
+			),
+			true
+		)
 		_refresh_status_label()
 		return
 	var owner_id: int = game_state.get_entity_owner_id(entity, 1)
@@ -602,6 +583,30 @@ func _on_train_requested(producer_id: int) -> void:
 	_refresh_status_label()
 	command_panel.refresh(game_state, client_state)
 	renderer.queue_redraw()
+
+
+func _format_food_flow_summary(food_summary: Dictionary) -> String:
+	var label: String = str(food_summary.get("label", ""))
+	var color: String = str(food_summary.get("color", "lightgreen"))
+	var provider_count: int = int(food_summary.get("provider_count", 0))
+	var income_per_window: int = int(food_summary.get("income_per_window", 0))
+	var demand_per_window: int = int(food_summary.get("demand_per_window", 0))
+	var farm_label: String = "%d farm" % provider_count
+	if provider_count != 1:
+		farm_label += "s"
+	var extra_farms_needed: int = int(food_summary.get("extra_farms_needed", 0))
+	var suffix: String = ""
+	if extra_farms_needed > 0:
+		suffix = "  (+%d farm%s)" % [extra_farms_needed, "" if extra_farms_needed == 1 else "s"]
+	return "%s  ~%d/%dt vs %d demand  [color=%s]%s[/color]%s" % [
+		farm_label,
+		income_per_window,
+		FoodReadinessClass.ANALYSIS_WINDOW_TICKS,
+		demand_per_window,
+		color,
+		label,
+		suffix,
+	]
 
 
 func _on_debug_toggle_requested() -> void:

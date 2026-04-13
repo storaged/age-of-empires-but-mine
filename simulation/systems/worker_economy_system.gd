@@ -60,6 +60,7 @@ func _update_to_resource(game_state: GameState, entity_id: int, worker_entity: D
 
 	if game_state.get_entity_path_cells(worker_entity).is_empty():
 		_reassign_resource_slot(game_state, entity_id, worker_entity)
+		game_state.entities[entity_id] = worker_entity
 
 
 func _update_gathering(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
@@ -126,6 +127,7 @@ func _update_to_stockpile(game_state: GameState, entity_id: int, worker_entity: 
 
 	if game_state.get_entity_path_cells(worker_entity).is_empty():
 		_reassign_stockpile_slot(game_state, entity_id, worker_entity)
+		game_state.entities[entity_id] = worker_entity
 
 
 func _update_depositing(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
@@ -241,6 +243,12 @@ func _reassign_construction_slot(game_state: GameState, entity_id: int, worker_e
 		_set_worker_idle(worker_entity)
 		return
 	var structure_cell: Vector2i = game_state.get_entity_grid_position(structure_entity)
+	# Already adjacent — use current position; no repath needed.
+	var worker_cell: Vector2i = game_state.get_entity_grid_position(worker_entity)
+	if game_state.are_cells_adjacent(worker_cell, structure_cell):
+		_assign_path_to_slot(game_state, worker_entity, worker_cell, "to_construction")
+		return
+	var all_slots: Array[Vector2i] = game_state.get_adjacent_walkable_cells(structure_cell)
 	var slot_cell: Vector2i = game_state.get_interaction_slot_for_worker(
 		structure_cell,
 		"assigned_construction_site_id",
@@ -248,7 +256,7 @@ func _reassign_construction_slot(game_state: GameState, entity_id: int, worker_e
 		entity_id,
 		["to_construction", "constructing"]
 	)
-	_assign_path_to_slot(game_state, worker_entity, slot_cell, "to_construction")
+	_assign_path_to_slot(game_state, worker_entity, slot_cell, "to_construction", all_slots)
 
 
 func _reassign_resource_slot(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
@@ -258,6 +266,12 @@ func _reassign_resource_slot(game_state: GameState, entity_id: int, worker_entit
 		return
 	var resource_entity: Dictionary = game_state.get_entity_dict(resource_node_id)
 	var resource_cell: Vector2i = game_state.get_entity_grid_position(resource_entity)
+	# Already adjacent — use current position; no repath needed.
+	var worker_cell: Vector2i = game_state.get_entity_grid_position(worker_entity)
+	if game_state.are_cells_adjacent(worker_cell, resource_cell):
+		_assign_path_to_slot(game_state, worker_entity, worker_cell, "to_resource")
+		return
+	var all_slots: Array[Vector2i] = game_state.get_adjacent_walkable_cells(resource_cell)
 	var slot_cell: Vector2i = game_state.get_interaction_slot_for_worker(
 		resource_cell,
 		"assigned_resource_node_id",
@@ -265,7 +279,7 @@ func _reassign_resource_slot(game_state: GameState, entity_id: int, worker_entit
 		entity_id,
 		["to_resource", "gathering"]
 	)
-	_assign_path_to_slot(game_state, worker_entity, slot_cell, "to_resource")
+	_assign_path_to_slot(game_state, worker_entity, slot_cell, "to_resource", all_slots)
 
 
 func _reassign_stockpile_slot(game_state: GameState, entity_id: int, worker_entity: Dictionary) -> void:
@@ -275,6 +289,12 @@ func _reassign_stockpile_slot(game_state: GameState, entity_id: int, worker_enti
 		return
 	var stockpile_entity: Dictionary = game_state.get_entity_dict(stockpile_id)
 	var stockpile_cell: Vector2i = game_state.get_entity_grid_position(stockpile_entity)
+	# Already adjacent — use current position; no repath needed.
+	var worker_cell: Vector2i = game_state.get_entity_grid_position(worker_entity)
+	if game_state.are_cells_adjacent(worker_cell, stockpile_cell):
+		_assign_path_to_slot(game_state, worker_entity, worker_cell, "to_stockpile")
+		return
+	var all_slots: Array[Vector2i] = game_state.get_adjacent_walkable_cells(stockpile_cell)
 	var slot_cell: Vector2i = game_state.get_interaction_slot_for_worker(
 		stockpile_cell,
 		"assigned_stockpile_id",
@@ -282,14 +302,18 @@ func _reassign_stockpile_slot(game_state: GameState, entity_id: int, worker_enti
 		entity_id,
 		["to_stockpile", "depositing"]
 	)
-	_assign_path_to_slot(game_state, worker_entity, slot_cell, "to_stockpile")
+	_assign_path_to_slot(game_state, worker_entity, slot_cell, "to_stockpile", all_slots)
 
 
+## Assigns path and slot to a worker.
+## When the primary slot is unreachable, tries fallback_slots in sorted order
+## before setting the worker idle. Bounded cost: at most one BFS per slot (max 4).
 func _assign_path_to_slot(
 	game_state: GameState,
 	worker_entity: Dictionary,
 	slot_cell: Vector2i,
-	task_state: String
+	task_state: String,
+	fallback_slots: Array[Vector2i] = []
 ) -> void:
 	var worker_cell: Vector2i = game_state.get_entity_grid_position(worker_entity)
 	if slot_cell == Vector2i(-1, -1):
@@ -297,8 +321,30 @@ func _assign_path_to_slot(
 		return
 	var path_cells: Array[Vector2i] = _find_path_avoid_occupied(game_state, worker_cell, slot_cell)
 	if worker_cell != slot_cell and path_cells.is_empty():
-		_set_worker_idle(worker_entity)
-		return
+		# Try other adjacent slots nearest-first, tie-break by coordinates.
+		var sorted_fallbacks: Array[Vector2i] = fallback_slots.duplicate()
+		sorted_fallbacks.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+			var da: int = absi(a.x - worker_cell.x) + absi(a.y - worker_cell.y)
+			var db: int = absi(b.x - worker_cell.x) + absi(b.y - worker_cell.y)
+			if da != db:
+				return da < db
+			if a.y != b.y:
+				return a.y < b.y
+			return a.x < b.x
+		)
+		var found: bool = false
+		for fallback in sorted_fallbacks:
+			if fallback == slot_cell:
+				continue
+			var fallback_path: Array[Vector2i] = _find_path_avoid_occupied(game_state, worker_cell, fallback)
+			if not fallback_path.is_empty() or worker_cell == fallback:
+				slot_cell = fallback
+				path_cells = fallback_path
+				found = true
+				break
+		if not found:
+			_set_worker_idle(worker_entity)
+			return
 	worker_entity["path_cells"] = path_cells
 	worker_entity["has_move_target"] = not path_cells.is_empty()
 	worker_entity["worker_task_state"] = task_state

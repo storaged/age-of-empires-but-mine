@@ -4,16 +4,24 @@ extends Node2D
 ## Rendering reads authoritative state and client state only.
 
 const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
+const VisibilityClass = preload("res://simulation/visibility.gd")
 
 var game_state: GameState
 var client_state: ClientState
 var cell_size: int = 64
 
+## Recomputed once per _draw() call; reused for all per-entity visibility checks.
+var _player_visible_cells: Dictionary = {}
+
+## entity_id → true for enemy structures the player has ever observed.
+## Client-side rendering memory only — not part of authoritative simulation.
+var _seen_enemy_structures: Dictionary = {}
+
 var grid_color: Color = Color("#3d4b4f")
 var hover_color: Color = Color(0.36, 0.49, 0.53, 0.18)
 var unit_color: Color = Color("#d6d2c4")
-var soldier_color: Color = Color("#e63946")
-var enemy_unit_color: Color = Color("#8b0000")
+var soldier_color: Color = Color("#4a7fc1")
+var enemy_unit_color: Color = Color("#e84a1e")
 var selected_color: Color = Color("#ffd166")
 var destination_color: Color = Color("#4ecdc4")
 var attack_indicator_color: Color = Color("#e63946")
@@ -28,10 +36,11 @@ var stockpile_color: Color = Color("#3a6ea5")
 var gather_color: Color = Color("#9fd356")
 var return_color: Color = Color("#7cc6fe")
 var build_color: Color = Color("#f4a261")
+var rally_color: Color = Color("#c77dff")
 var structure_color: Color = Color("#a56b3a")
 var barracks_color: Color = Color("#4a4e69")
 var archery_range_color: Color = Color("#1a6b5a")
-var enemy_structure_color: Color = Color("#6b1a1a")
+var enemy_structure_color: Color = Color("#c93a1a")
 
 
 func configure(
@@ -47,6 +56,7 @@ func configure(
 func _draw() -> void:
 	if game_state == null or client_state == null:
 		return
+	_player_visible_cells = VisibilityClass.compute_visible_cells(game_state, 1)
 
 	_draw_grid()
 	_draw_obstacles()
@@ -56,6 +66,8 @@ func _draw() -> void:
 	_draw_drag_selection()
 	_draw_destination_indicators()
 	_draw_selected_paths()
+	_draw_selected_producer_rally()
+	_draw_selected_attack_ranges()
 	_draw_units()
 
 
@@ -131,6 +143,7 @@ func _draw_destination_indicators() -> void:
 			and indicator_type != "return_target"
 			and indicator_type != "build_target"
 			and indicator_type != "attack_target"
+			and indicator_type != "rally_target"
 		):
 			continue
 
@@ -151,6 +164,11 @@ func _draw_destination_indicators() -> void:
 		elif indicator_type == "build_target":
 			draw_rect(_cell_rect(cell).grow(-10.0), Color(0.96, 0.64, 0.38, 0.2), true)
 			draw_rect(_cell_rect(cell).grow(-10.0), build_color, false, 3.0)
+		elif indicator_type == "rally_target":
+			draw_arc(center, offset, 0.0, TAU, 24, rally_color, 3.0)
+			draw_line(center + Vector2(-offset * 0.8, 0.0), center + Vector2(offset * 0.8, 0.0), rally_color, 3.0)
+			draw_line(center + Vector2(offset * 0.45, -offset * 0.35), center + Vector2(offset * 0.8, 0.0), rally_color, 3.0)
+			draw_line(center + Vector2(offset * 0.45, offset * 0.35), center + Vector2(offset * 0.8, 0.0), rally_color, 3.0)
 		elif indicator_type == "attack_target":
 			draw_arc(center, offset, 0.0, TAU, 24, attack_indicator_color, 3.0)
 			draw_line(center + Vector2(-offset * 0.65, -offset * 0.65), center + Vector2(offset * 0.65, offset * 0.65), attack_indicator_color, 3.0)
@@ -216,9 +234,21 @@ func _draw_stockpile(entity: Dictionary) -> void:
 
 func _draw_structure(entity: Dictionary) -> void:
 	var structure_cell: Vector2i = game_state.get_entity_grid_position(entity)
+	var owner_id: int = game_state.get_entity_owner_id(entity, 1)
+
+	if owner_id != 1:
+		var entity_id: int = game_state.get_entity_id(entity)
+		var in_vision: bool = _player_visible_cells.has(game_state.cell_key(structure_cell))
+		if in_vision:
+			_seen_enemy_structures[entity_id] = true
+		elif _seen_enemy_structures.has(entity_id):
+			_draw_ghost_structure(structure_cell)
+			return
+		else:
+			return  # Never seen — stay hidden.
+
 	var rect: Rect2 = _cell_rect(structure_cell).grow(-7.0)
 	var constructed: bool = game_state.get_entity_is_constructed(entity)
-	var owner_id: int = game_state.get_entity_owner_id(entity, 1)
 	var structure_type: String = game_state.get_entity_structure_type(entity)
 
 	var base_color: Color = structure_color
@@ -226,8 +256,8 @@ func _draw_structure(entity: Dictionary) -> void:
 	var border_color: Color = Color("#3b2413")
 	if owner_id != 1:
 		base_color = enemy_structure_color
-		inner_color = Color("#c44")
-		border_color = Color("#3b0000")
+		inner_color = Color("#ff7755")
+		border_color = Color("#7a1a00")
 	else:
 		var render_colors: Dictionary = GameDefinitionsClass.get_building_render_colors(structure_type)
 		if not render_colors.is_empty():
@@ -264,6 +294,15 @@ func _draw_structure(entity: Dictionary) -> void:
 		draw_rect(Rect2(hp_bar_rect.position, Vector2(hp_bar_rect.size.x * hp_ratio, hp_bar_rect.size.y)), Color("#e63946"), true)
 
 	_draw_static_selection_outline(entity, rect)
+
+
+## Draws a dimmed "last seen" ghost for an enemy structure at the given cell.
+## No HP bar, no construction progress — player has no real-time intel.
+func _draw_ghost_structure(cell: Vector2i) -> void:
+	var rect: Rect2 = _cell_rect(cell).grow(-7.0)
+	draw_rect(rect, Color(0.30, 0.12, 0.12, 0.40), true)
+	draw_rect(rect.grow(-12.0), Color(0.48, 0.18, 0.18, 0.30), true)
+	draw_rect(rect, Color(0.38, 0.14, 0.14, 0.55), false, 2.0)
 
 
 func _draw_static_selection_outline(entity: Dictionary, rect: Rect2) -> void:
@@ -318,6 +357,58 @@ func _draw_selected_paths() -> void:
 		draw_polyline(line_points, Color(0.32, 0.80, 0.92, 0.7), 3.0)
 
 
+func _draw_selected_producer_rally() -> void:
+	if client_state.selected_entity_ids.size() != 1:
+		return
+	var selected_id: int = client_state.selected_entity_ids[0]
+	if not game_state.entities.has(selected_id):
+		return
+	var entity: Dictionary = game_state.get_entity_dict(selected_id)
+	var entity_type: String = game_state.get_entity_type(entity)
+	if entity_type != "stockpile" and entity_type != "structure":
+		return
+	var rally_mode: String = game_state.get_entity_rally_mode(entity)
+	if rally_mode == "":
+		return
+	var rally_cell: Vector2i = game_state.get_entity_rally_cell(entity)
+	if rally_cell.x < 0 or rally_cell.y < 0:
+		return
+	draw_line(
+		_cell_center(game_state.get_entity_grid_position(entity)),
+		_cell_center(rally_cell),
+		Color(rally_color.r, rally_color.g, rally_color.b, 0.5),
+		2.0
+	)
+
+
+func _draw_selected_attack_ranges() -> void:
+	if client_state.selected_entity_ids.size() != 1:
+		return
+
+	var selected_id: int = client_state.selected_entity_ids[0]
+	if not game_state.entities.has(selected_id):
+		return
+
+	var entity: Dictionary = game_state.get_entity_dict(selected_id)
+	if not game_state.get_entity_can_attack(entity):
+		return
+
+	var attack_range: int = game_state.get_entity_attack_range_cells(entity)
+	if attack_range <= 0:
+		return
+
+	var center: Vector2 = _cell_center(game_state.get_entity_grid_position(entity))
+	var radius: float = float(cell_size * attack_range)
+	var points: PackedVector2Array = PackedVector2Array([
+		center + Vector2(0.0, -radius),
+		center + Vector2(radius, 0.0),
+		center + Vector2(0.0, radius),
+		center + Vector2(-radius, 0.0),
+		center + Vector2(0.0, -radius),
+	])
+	draw_polyline(points, Color(0.98, 0.86, 0.34, 0.45), 2.0)
+
+
 func _draw_units() -> void:
 	var entity_ids: Array = game_state.entities.keys()
 	entity_ids.sort()
@@ -326,6 +417,13 @@ func _draw_units() -> void:
 		var entity: Dictionary = game_state.get_entity_dict(entity_id)
 		if game_state.get_entity_type(entity) != "unit":
 			continue
+
+		# Hide enemy units not currently in player vision.
+		var owner_id: int = game_state.get_entity_owner_id(entity, 1)
+		if owner_id != 1:
+			var authoritative_cell_check: Vector2i = game_state.get_entity_grid_position(entity)
+			if not _player_visible_cells.has(game_state.cell_key(authoritative_cell_check)):
+				continue
 
 		var authoritative_cell: Vector2i = game_state.get_entity_grid_position(entity)
 		var authoritative_center: Vector2 = _cell_center(authoritative_cell)
@@ -354,8 +452,8 @@ func _draw_units() -> void:
 			draw_arc(visual_position + Vector2(-unit_radius * 0.15, 0.0), unit_radius * 0.45, -PI * 0.5, PI * 0.5, 12, Color("#e0f7fa"), 3.0)
 			draw_line(visual_position + Vector2(-unit_radius * 0.15, -unit_radius * 0.45), visual_position + Vector2(-unit_radius * 0.15, unit_radius * 0.45), Color("#e0f7fa"), 2.0)
 		elif unit_role == "enemy_dummy":
-			draw_line(visual_position + Vector2(-unit_radius * 0.4, -unit_radius * 0.4), visual_position + Vector2(unit_radius * 0.4, unit_radius * 0.4), Color("#ff6666"), 3.0)
-			draw_line(visual_position + Vector2(-unit_radius * 0.4, unit_radius * 0.4), visual_position + Vector2(unit_radius * 0.4, -unit_radius * 0.4), Color("#ff6666"), 3.0)
+			draw_line(visual_position + Vector2(-unit_radius * 0.4, -unit_radius * 0.4), visual_position + Vector2(unit_radius * 0.4, unit_radius * 0.4), Color("#ffaa88"), 3.0)
+			draw_line(visual_position + Vector2(-unit_radius * 0.4, unit_radius * 0.4), visual_position + Vector2(unit_radius * 0.4, -unit_radius * 0.4), Color("#ffaa88"), 3.0)
 
 		if unit_role == "worker" and game_state.get_entity_carried_amount(entity) > 0:
 			draw_circle(

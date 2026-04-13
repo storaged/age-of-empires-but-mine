@@ -3,6 +3,7 @@ extends SceneTree
 ## Headless test: verifies basic combat — soldier attacks and kills enemy.
 
 const GameStateClass = preload("res://simulation/game_state.gd")
+const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const BuildCommandSystemClass = preload("res://simulation/systems/build_command_system.gd")
 const CombatSystemClass = preload("res://simulation/systems/combat_system.gd")
 const GatherCommandSystemClass = preload("res://simulation/systems/gather_command_system.gd")
@@ -25,6 +26,7 @@ const CELL_SIZE: int = 64
 func _init() -> void:
 	var failures: Array[String] = []
 	failures.append_array(run_soldier_kills_enemy_test())
+	failures.append_array(run_archer_attacks_from_range_test())
 	failures.append_array(run_interrupt_and_idle_test())
 	if failures.is_empty():
 		print("COMBAT_TEST: PASS")
@@ -78,6 +80,61 @@ func run_soldier_kills_enemy_test() -> Array[String]:
 
 
 ## Test 2: attack interrupted by move command — soldier goes idle, no stale attack.
+func run_archer_attacks_from_range_test() -> Array[String]:
+	var failures: Array[String] = []
+	var game_state: GameState = GameStateClass.new()
+	game_state.resources = {"wood": 0, "stone": 0}
+	game_state.map_data = {
+		"width": MAP_WIDTH,
+		"height": MAP_HEIGHT,
+		"cell_size": CELL_SIZE,
+		"blocked_cells": {},
+	}
+
+	var archer_id: int = game_state.allocate_entity_id()
+	var archer_cell: Vector2i = Vector2i(6, 8)
+	game_state.entities[archer_id] = GameDefinitionsClass.create_unit_entity(
+		"archer",
+		archer_id,
+		1,
+		archer_cell,
+		0
+	)
+	game_state.occupancy[game_state.cell_key(archer_cell)] = archer_id
+
+	var enemy_id: int = game_state.allocate_entity_id()
+	var enemy_cell: Vector2i = Vector2i(9, 8)
+	game_state.entities[enemy_id] = GameDefinitionsClass.create_unit_entity(
+		"enemy_dummy",
+		enemy_id,
+		2,
+		enemy_cell,
+		0
+	)
+	game_state.occupancy[game_state.cell_key(enemy_cell)] = enemy_id
+
+	var tick_manager: TickManager = _make_tick_manager(game_state)
+	tick_manager.queue_command(AttackCommandClass.new(0, 1, 0, archer_id, enemy_id))
+
+	var killed: bool = false
+	for _i in range(30):
+		tick_manager.advance_one_tick()
+		if not game_state.entities.has(enemy_id):
+			killed = true
+			break
+
+	if not killed:
+		failures.append("[archer_range] Archer failed to kill target from ranged attack flow.")
+		return failures
+
+	var archer: Dictionary = game_state.get_entity_dict(archer_id)
+	if game_state.get_entity_grid_position(archer) != archer_cell:
+		failures.append("[archer_range] Archer moved despite already being in range.")
+
+	return failures
+
+
+## Test 3: attack interrupted by move command — soldier goes idle, no stale attack.
 func run_interrupt_and_idle_test() -> Array[String]:
 	var failures: Array[String] = []
 	var game_state: GameState = _create_initial_game_state()
@@ -150,45 +207,25 @@ func _create_initial_game_state() -> GameState:
 	# One player soldier close to enemy
 	var soldier_id: int = state.allocate_entity_id()
 	var soldier_cell: Vector2i = Vector2i(10, 8)
-	state.entities[soldier_id] = {
-		"id": soldier_id,
-		"entity_type": "unit",
-		"unit_role": "soldier",
-		"owner_id": 1,
-		"grid_position": soldier_cell,
-		"move_target": soldier_cell,
-		"path_cells": [],
-		"has_move_target": false,
-		"worker_task_state": "idle",
-		"interaction_slot_cell": Vector2i(-1, -1),
-		"traffic_state": "",
-		"hp": 30,
-		"max_hp": 30,
-		"attack_target_id": 0,
-		"attack_cooldown_remaining": 0,
-		"attack_damage": 8,
-		"attack_cooldown_ticks": 4,
-	}
+	state.entities[soldier_id] = GameDefinitionsClass.create_unit_entity(
+		"soldier",
+		soldier_id,
+		1,
+		soldier_cell,
+		0
+	)
 	state.occupancy["10,8"] = soldier_id
 
 	# One enemy dummy unit
 	var enemy_id: int = state.allocate_entity_id()
 	var enemy_cell: Vector2i = Vector2i(14, 8)
-	state.entities[enemy_id] = {
-		"id": enemy_id,
-		"entity_type": "unit",
-		"unit_role": "enemy_dummy",
-		"owner_id": 2,
-		"grid_position": enemy_cell,
-		"move_target": enemy_cell,
-		"path_cells": [],
-		"has_move_target": false,
-		"worker_task_state": "idle",
-		"interaction_slot_cell": Vector2i(-1, -1),
-		"traffic_state": "",
-		"hp": 20,
-		"max_hp": 20,
-	}
+	state.entities[enemy_id] = GameDefinitionsClass.create_unit_entity(
+		"enemy_dummy",
+		enemy_id,
+		2,
+		enemy_cell,
+		0
+	)
 	state.occupancy["14,8"] = enemy_id
 
 	return state

@@ -5,8 +5,11 @@ extends Control
 ## No simulation mutation — all signals handled by prototype_gameplay.gd.
 
 const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
+const FoodReadinessClass = preload("res://simulation/food_readiness.gd")
+const StrategicTimingClass = preload("res://simulation/strategic_timing.gd")
+const VisibilityClass = preload("res://simulation/visibility.gd")
 
-const PANEL_HEIGHT: int = 130
+const PANEL_HEIGHT: int = 144
 const DETAIL_WIDTH: int = 290
 const BUTTON_W: int = 104
 const BUTTON_H: int = 48
@@ -124,14 +127,26 @@ func _get_context_actions(game_state: GameState, client_state: ClientState) -> A
 			var can_afford: bool = game_state.can_afford_building(building_type)
 			var enabled: bool = prereq_met and can_afford
 			var disabled_reason: String = ""
+			var tooltip_text: String = "%s — %s" % [
+				display_name,
+				GameDefinitionsClass.format_costs(costs),
+			]
 			if not prereq_met:
 				var prereq_name: String = GameDefinitionsClass.get_building_display_name(prereq)
 				disabled_reason = "Need %s first" % prereq_name
 			elif not can_afford:
-				disabled_reason = "Not enough resources"
+				var missing_costs: Dictionary = game_state.get_missing_building_costs(building_type)
+				disabled_reason = "Need %s" % GameDefinitionsClass.format_costs(missing_costs)
+			if GameDefinitionsClass.get_building_supply_provided(building_type) > 0:
+				tooltip_text += "  (+%d supply)" % GameDefinitionsClass.get_building_supply_provided(building_type)
+			var trickle_type: String = GameDefinitionsClass.get_structure_resource_trickle_type(building_type)
+			var trickle_amount: int = GameDefinitionsClass.get_structure_resource_trickle_amount(building_type)
+			var trickle_interval: int = GameDefinitionsClass.get_structure_resource_trickle_interval_ticks(building_type)
+			if trickle_type != "" and trickle_amount > 0 and trickle_interval > 0:
+				tooltip_text += "  (+%d %s / %d ticks)" % [trickle_amount, trickle_type, trickle_interval]
 			actions.append({
 				"label": "%s\n%s" % [display_name, cost_str],
-				"tooltip": "%s — %s" % [display_name, GameDefinitionsClass.format_costs(costs)],
+				"tooltip": tooltip_text,
 				"enabled": enabled,
 				"disabled_reason": disabled_reason,
 				"type": "build",
@@ -144,11 +159,9 @@ func _get_context_actions(game_state: GameState, client_state: ClientState) -> A
 		var entity: Dictionary = game_state.get_entity_dict(sel_id)
 		var entity_type: String = game_state.get_entity_type(entity)
 		var produces: String = ""
-		if entity_type == "stockpile":
-			produces = GameDefinitionsClass.get_stockpile_produces()
-		elif entity_type == "structure" and game_state.get_entity_is_constructed(entity):
+		if entity_type == "stockpile" or (entity_type == "structure" and game_state.get_entity_is_constructed(entity)):
 			var structure_type: String = game_state.get_entity_structure_type(entity)
-			produces = GameDefinitionsClass.get_building_produces(structure_type)
+			produces = GameDefinitionsClass.get_structure_produces(structure_type)
 		if produces != "":
 			var costs: Dictionary = GameDefinitionsClass.get_unit_production_costs(produces)
 			var display_name: String = GameDefinitionsClass.get_unit_display_name(produces)
@@ -158,13 +171,27 @@ func _get_context_actions(game_state: GameState, client_state: ClientState) -> A
 			var has_population_room: bool = game_state.can_queue_population_for_unit(owner_id, produces)
 			var can_train: bool = can_afford and has_population_room
 			var disabled_reason: String = ""
+			var tooltip_text: String = "Train %s — %s  (pop %d, total %s)" % [
+				display_name,
+				GameDefinitionsClass.format_costs(costs),
+				GameDefinitionsClass.get_unit_population_cost(produces),
+				_format_population_summary(game_state, owner_id),
+			]
+			var unit_counter_label: String = GameDefinitionsClass.get_counter_label(produces)
+			if unit_counter_label != "":
+				tooltip_text += "\nStrong vs: %s" % unit_counter_label
 			if not can_afford:
-				disabled_reason = "Not enough resources"
+				var missing_costs: Dictionary = game_state.get_missing_production_costs(produces)
+				disabled_reason = FoodReadinessClass.build_missing_food_message(
+					game_state,
+					owner_id,
+					missing_costs
+				)
 			elif not has_population_room:
 				disabled_reason = "Need more houses"
 			actions.append({
 				"label": "Train\n%s\n%s" % [display_name, cost_str],
-				"tooltip": "Train %s — %s" % [display_name, GameDefinitionsClass.format_costs(costs)],
+				"tooltip": tooltip_text,
 				"enabled": can_train,
 				"disabled_reason": disabled_reason,
 				"type": "train",
@@ -204,14 +231,36 @@ func _refresh_detail(game_state: GameState, client_state: ClientState) -> void:
 		)
 		var place_color: String = "lightgreen" if client_state.placement_preview_valid else "tomato"
 		lines.append("[color=%s][b]Place %s[/b] — %s[/color]" % [place_color, build_display, build_costs])
+		if not client_state.placement_preview_valid and client_state.placement_preview_reason != "":
+			lines.append("[color=tomato]%s[/color]" % client_state.placement_preview_reason)
 		lines.append("[color=gray]Right-click to place. ESC or Cancel to stop.[/color]")
 		_detail_label.text = "\n".join(lines)
 		return
 
 	var sel_count: int = client_state.selected_entity_ids.size()
 	if sel_count == 0:
-		lines.append("[color=gray]Nothing selected.[/color]")
-		lines.append("[color=gray]Left-click to select. Drag for multi-select.[/color]")
+		var summary: Dictionary = StrategicTimingClass.build_player_summary(game_state, 1)
+		var timing_state: Dictionary = summary.get("timing_state", {})
+		var timing_label: String = str(timing_state.get("label", ""))
+		var timing_color: String = str(timing_state.get("color", "lightgreen"))
+		lines.append("[b]Stage:[/b] %s  [color=%s]%s[/color]" % [
+			str(summary.get("stage_label", "")),
+			timing_color,
+			timing_label,
+		])
+		lines.append("[b]Goal:[/b] %s" % str(summary.get("next_goal", "")))
+		lines.append("[b]Bottleneck:[/b] %s" % str(summary.get("bottleneck", "")))
+		var food_summary: Dictionary = summary.get("food_summary", {})
+		lines.append("[b]Food:[/b] %s" % _format_food_summary(food_summary))
+		var army_pipeline: Dictionary = summary.get("army_pipeline", {})
+		if int(summary.get("combat_unit_count", 0)) > 0 or int(summary.get("queued_combat_unit_count", 0)) > 0:
+			lines.append("[b]Army:[/b] %s" % _format_army_pipeline(army_pipeline, int(summary.get("queued_combat_unit_count", 0))))
+		var visible_enemies: int = VisibilityClass.count_visible_enemy_units(game_state, 1)
+		if visible_enemies > 0:
+			lines.append("[b]Intel:[/b] [color=orange]%d enemy unit%s in sight[/color]" % [
+				visible_enemies, "s" if visible_enemies != 1 else ""
+			])
+		lines.append("[b]Pressure:[/b] %s" % StrategicTimingClass.get_enemy_pressure_text(game_state))
 		_detail_label.text = "\n".join(lines)
 		return
 
@@ -230,14 +279,19 @@ func _build_selected_summary(game_state: GameState, client_state: ClientState) -
 		var first_role: String = game_state.get_entity_unit_role(
 			game_state.get_entity_dict(client_state.selected_entity_ids[0])
 		)
-		var label: String
-		if first_role == "soldier":
-			label = "soldiers"
-		elif first_role == "archer":
-			label = "archers"
-		else:
+		var label: String = GameDefinitionsClass.get_unit_display_name(first_role).to_lower() + "s"
+		if first_role == "worker":
 			label = "workers"
-		return "[b]%d %s:[/b] %s" % [sel_count, label, ", ".join(task_parts)]
+		var owner_id: int = game_state.get_entity_owner_id(
+			game_state.get_entity_dict(client_state.selected_entity_ids[0]),
+			1
+		)
+		return "[b]%d %s:[/b] %s\n[b]Pop:[/b] %s" % [
+			sel_count,
+			label,
+			", ".join(task_parts),
+			_format_population_summary(game_state, owner_id),
+		]
 
 	var sel_id: int = client_state.selected_entity_ids[0]
 	var entity: Dictionary = game_state.get_entity_dict(sel_id)
@@ -246,31 +300,37 @@ func _build_selected_summary(game_state: GameState, client_state: ClientState) -
 	if entity_type == "stockpile":
 		var hp: int = game_state.get_entity_hp(entity)
 		var max_hp: int = game_state.get_entity_max_hp(entity)
-		var pop_used: int = game_state.get_population_used(game_state.get_entity_owner_id(entity, 1))
-		var pop_cap: int = game_state.get_population_cap(game_state.get_entity_owner_id(entity, 1))
-		var sp_unit: String = GameDefinitionsClass.get_stockpile_produces()
+		var owner_id: int = game_state.get_entity_owner_id(entity, 1)
+		var sp_unit: String = GameDefinitionsClass.get_structure_produces("stockpile")
 		var sp_name: String = GameDefinitionsClass.get_unit_display_name(sp_unit).to_lower()
 		var queue_count: int = game_state.get_entity_production_queue_count(entity)
 		if queue_count > 0:
 			var progress: int = game_state.get_entity_production_progress_ticks(entity)
 			var duration: int = game_state.get_entity_production_duration_ticks(entity)
-			return "[b]Base:[/b] HP %d/%d  pop %d/%d  producing %s  %d/%d ticks" % [
+			return "[b]Base:[/b] HP %d/%d\n[b]Pop:[/b] %s\n[b]Training:[/b] %s (%d queued)  %d/%d ticks\n[b]Rally:[/b] %s" % [
 				hp,
 				max_hp,
-				pop_used,
-				pop_cap,
+				_format_population_summary(game_state, owner_id),
 				sp_name,
+				queue_count,
 				progress,
 				duration,
+				_format_rally_summary(game_state, entity),
 			]
 		if game_state.get_entity_is_production_blocked(entity):
-			return "[color=tomato][b]Base:[/b] HP %d/%d  pop %d/%d  blocked — no spawn space[/color]" % [
+			return "[color=tomato][b]Base:[/b] HP %d/%d\n[b]Pop:[/b] %s\n[b]Training:[/b] blocked — no spawn space[/color]\n[b]Rally:[/b] %s" % [
 				hp,
 				max_hp,
-				pop_used,
-				pop_cap,
+				_format_population_summary(game_state, owner_id),
+				_format_rally_summary(game_state, entity),
 			]
-		return "[b]Base:[/b] HP %d/%d  pop %d/%d  idle" % [hp, max_hp, pop_used, pop_cap]
+		return "[b]Base:[/b] HP %d/%d\n[b]Pop:[/b] %s\n[b]Training:[/b] idle (%s)\n[b]Rally:[/b] %s\n[color=gray]Right-click ground/resource to set rally.[/color]" % [
+			hp,
+			max_hp,
+			_format_population_summary(game_state, owner_id),
+			sp_name,
+			_format_rally_summary(game_state, entity),
+		]
 
 	if entity_type == "structure":
 		var owner_id: int = game_state.get_entity_owner_id(entity)
@@ -289,6 +349,8 @@ func _build_selected_summary(game_state: GameState, client_state: ClientState) -
 		if not constructed:
 			var progress: int = game_state.get_entity_construction_progress_ticks(entity)
 			var duration: int = game_state.get_entity_construction_duration_ticks(entity)
+			var pct: int = int(round((float(progress) / float(maxi(duration, 1))) * 100.0))
+			var remaining_ticks: int = maxi(duration - progress, 0)
 			var active_builder: int = game_state.get_active_builder_id_for_structure(sel_id)
 			var builder_status: String
 			if active_builder != 0:
@@ -296,44 +358,101 @@ func _build_selected_summary(game_state: GameState, client_state: ClientState) -
 				var builder_task: String = game_state.get_entity_task_state(builder_entity)
 				builder_status = "[color=lightgreen]building[/color]" if builder_task == "constructing" else "[color=yellow]en route[/color]"
 			else:
-				builder_status = "[color=tomato]no builder — select worker + right-click[/color]"
-			return "[b]%s:[/b] %d/%d ticks  %s" % [building_label, progress, duration, builder_status]
-		var produces: String = GameDefinitionsClass.get_building_produces(structure_type)
+				builder_status = "[color=tomato]idle — no builder assigned[/color]"
+			return "[b]%s:[/b] %d%%  (%d/%d ticks, %d left)\n[b]Builder:[/b] %s" % [
+				building_label,
+				pct,
+				progress,
+				duration,
+				remaining_ticks,
+				builder_status,
+			]
+		var produces: String = GameDefinitionsClass.get_structure_produces(structure_type)
 		if produces != "":
 			var produce_name: String = GameDefinitionsClass.get_unit_display_name(produces).to_lower()
 			var queue_count: int = game_state.get_entity_production_queue_count(entity)
-			var pop_used: int = game_state.get_population_used(game_state.get_entity_owner_id(entity, 1))
-			var pop_cap: int = game_state.get_population_cap(game_state.get_entity_owner_id(entity, 1))
+			var queue_suffix: String = "%d queued" % queue_count if queue_count > 0 else "idle"
+			var pop_summary: String = _format_population_summary(game_state, owner_id)
 			if queue_count > 0:
 				var progress: int = game_state.get_entity_production_progress_ticks(entity)
 				var duration: int = game_state.get_entity_production_duration_ticks(entity)
-				return "[b]%s:[/b] pop %d/%d  training %s  %d/%d ticks" % [
+				var pct: int = int(round((float(progress) / float(maxi(duration, 1))) * 100.0))
+				var readiness_line: String = _build_producer_food_line(game_state, owner_id, produces)
+				var batch_eta: int = StrategicTimingClass.get_producer_batch_eta(game_state, entity)
+				var batch_suffix: String = ""
+				if queue_count > 1:
+					batch_suffix = "  [color=gray](batch done ~%dt)[/color]" % batch_eta
+				return "[b]%s:[/b] %s\n[b]Pop:[/b] %s\n[b]Training:[/b] %s  %d/%d ticks (%d%%)%s\n[b]Food:[/b] %s\n[b]Rally:[/b] %s" % [
 					building_label,
-					pop_used,
-					pop_cap,
+					queue_suffix,
+					pop_summary,
 					produce_name,
 					progress,
 					duration,
+					pct,
+					batch_suffix,
+					readiness_line,
+					_format_rally_summary(game_state, entity),
 				]
 			if game_state.get_entity_is_production_blocked(entity):
-				return "[color=tomato][b]%s:[/b] pop %d/%d  blocked — no spawn space[/color]" % [
+				return "[color=tomato][b]%s:[/b] %s\n[b]Pop:[/b] %s\n[b]Training:[/b] blocked — no spawn space[/color]\n[b]Food:[/b] %s\n[b]Rally:[/b] %s" % [
 					building_label,
-					pop_used,
-					pop_cap,
+					queue_suffix,
+					pop_summary,
+					_build_producer_food_line(game_state, owner_id, produces),
+					_format_rally_summary(game_state, entity),
 				]
-			return "[b]%s:[/b] pop %d/%d  built" % [building_label, pop_used, pop_cap]
+			return "[b]%s:[/b] built\n[b]Pop:[/b] %s\n[b]Training:[/b] idle (%s)\n[b]Food:[/b] %s\n[b]Rally:[/b] %s\n[color=gray]Right-click ground to set rally.[/color]" % [
+				building_label,
+				pop_summary,
+				produce_name,
+				_build_producer_food_line(game_state, owner_id, produces),
+				_format_rally_summary(game_state, entity),
+			]
+		var trickle_type: String = game_state.get_entity_resource_trickle_type(entity)
+		var trickle_amount: int = game_state.get_entity_resource_trickle_amount(entity)
+		var trickle_interval: int = game_state.get_entity_resource_trickle_interval_ticks(entity)
+		if trickle_type != "" and trickle_amount > 0 and trickle_interval > 0:
+			var trickle_progress: int = game_state.get_entity_resource_trickle_progress_ticks(entity)
+			return "[b]%s:[/b] built\n[b]Income:[/b] +%d %s every %d ticks\n[b]Next payout:[/b] %d/%d ticks" % [
+				building_label,
+				trickle_amount,
+				trickle_type,
+				trickle_interval,
+				trickle_progress,
+				trickle_interval,
+			]
 		return "[b]%s:[/b] built" % building_label
 
 	var unit_role: String = game_state.get_entity_unit_role(entity)
 	var task: String = game_state.get_entity_task_state(entity)
 
-	if unit_role == "soldier" or unit_role == "archer":
+	if game_state.get_entity_can_attack(entity):
 		var hp: int = game_state.get_entity_hp(entity)
 		var max_hp: int = game_state.get_entity_max_hp(entity)
 		var target_id: int = game_state.get_entity_attack_target_id(entity)
 		var target_info: String = " → #%d" % target_id if target_id != 0 else ""
 		var unit_label: String = GameDefinitionsClass.get_unit_display_name(unit_role)
-		return "[b]%s:[/b] %s%s  HP %d/%d" % [unit_label, task, target_info, hp, max_hp]
+		var attack_damage: int = game_state.get_entity_int(entity, "attack_damage", 0)
+		var attack_range: int = game_state.get_entity_attack_range_cells(entity)
+		var attack_cooldown: int = game_state.get_entity_int(entity, "attack_cooldown_ticks", 0)
+		var counter_label: String = GameDefinitionsClass.get_counter_label(unit_role)
+		var counter_line: String = ""
+		if counter_label != "":
+			counter_line = "\n[b]Strong vs:[/b] [color=lightgreen]%s[/color]" % counter_label
+		var vision_radius: int = game_state.get_entity_vision_radius(entity)
+		return "[b]%s:[/b] %s%s  HP %d/%d\n[b]Attack:[/b] %d dmg  range %d  cd %d  vision %d%s" % [
+			unit_label,
+			task,
+			target_info,
+			hp,
+			max_hp,
+			attack_damage,
+			attack_range,
+			attack_cooldown,
+			vision_radius,
+			counter_line,
+		]
 
 	if unit_role == "enemy_dummy":
 		var hp: int = game_state.get_entity_hp(entity)
@@ -342,7 +461,116 @@ func _build_selected_summary(game_state: GameState, client_state: ClientState) -
 
 	var carry: int = game_state.get_entity_carried_amount(entity)
 	var capacity: int = game_state.get_entity_capacity(entity)
-	return "[b]Worker:[/b] %s  carry %d/%d" % [task, carry, capacity]
+	var traffic_state: String = game_state.get_entity_string(entity, "traffic_state", "")
+	var assignment_summary: String = _build_worker_assignment_summary(game_state, entity)
+	var traffic_summary: String = "  traffic %s" % traffic_state if traffic_state != "" else ""
+	return "[b]Worker:[/b] %s%s\n[b]Carry:[/b] %d/%d\n[b]Task:[/b] %s" % [
+		task,
+		traffic_summary,
+		carry,
+		capacity,
+		assignment_summary,
+	]
+
+
+func _format_population_summary(game_state: GameState, owner_id: int) -> String:
+	var living: int = game_state.get_population_used(owner_id)
+	var queued: int = game_state.get_population_queued(owner_id)
+	var cap: int = game_state.get_population_cap(owner_id)
+	if queued > 0:
+		return "%d + %d queued / %d" % [living, queued, cap]
+	return "%d / %d" % [living, cap]
+
+
+func _format_army_pipeline(pipeline: Dictionary, queued_count: int) -> String:
+	var ready: int = int(pipeline.get("ready", 0))
+	var assembling: int = int(pipeline.get("assembling", 0))
+	var deployed: int = int(pipeline.get("deployed", 0))
+	var parts: Array[String] = []
+	if ready > 0:
+		parts.append("[color=lightgreen]%d ready[/color]" % ready)
+	if assembling > 0:
+		parts.append("[color=khaki]%d assembling[/color]" % assembling)
+	if deployed > 0:
+		parts.append("[color=orange]%d deployed[/color]" % deployed)
+	if queued_count > 0:
+		parts.append("[color=gray]%d training[/color]" % queued_count)
+	if parts.is_empty():
+		return "none"
+	return "  ".join(parts)
+
+
+func _format_food_summary(food_summary: Dictionary) -> String:
+	var label: String = str(food_summary.get("label", ""))
+	var income_per_window: int = int(food_summary.get("income_per_window", 0))
+	var demand_per_window: int = int(food_summary.get("demand_per_window", 0))
+	var provider_count: int = int(food_summary.get("provider_count", 0))
+	var can_sustain_another: bool = bool(food_summary.get("can_sustain_another_producer", false))
+	var base: String = "%s  (%d farms, ~%d / %dt vs %d demand)" % [
+		label,
+		provider_count,
+		income_per_window,
+		FoodReadinessClass.ANALYSIS_WINDOW_TICKS,
+		demand_per_window,
+	]
+	if can_sustain_another:
+		return base + "  [color=lightgreen]→ add Barracks[/color]"
+	return base
+
+
+func _build_producer_food_line(game_state: GameState, owner_id: int, produced_unit_type: String) -> String:
+	var costs: Dictionary = GameDefinitionsClass.get_unit_production_costs(produced_unit_type)
+	if not costs.has("food"):
+		return "not required"
+	var food_summary: Dictionary = FoodReadinessClass.build_food_summary(game_state, owner_id)
+	var text: String = _format_food_summary(food_summary)
+	var extra_farms_needed: int = int(food_summary.get("extra_farms_needed", 0))
+	if extra_farms_needed > 0:
+		text += "  (+%d farm)" % extra_farms_needed
+		if extra_farms_needed > 1:
+			text += "s"
+	return text
+
+
+func _build_worker_assignment_summary(game_state: GameState, entity: Dictionary) -> String:
+	var task: String = game_state.get_entity_task_state(entity)
+	var resource_node_id: int = game_state.get_entity_assigned_resource_node_id(entity)
+	if resource_node_id != 0:
+		var resource_node: Dictionary = game_state.get_entity_dict(resource_node_id)
+		var resource_type: String = game_state.get_entity_resource_type(resource_node)
+		return "%s #%d" % [task, resource_node_id] if resource_type == "" else "%s %s #%d" % [task, resource_type, resource_node_id]
+
+	var stockpile_id: int = game_state.get_entity_assigned_stockpile_id(entity)
+	if stockpile_id != 0:
+		return "%s base #%d" % [task, stockpile_id]
+
+	var structure_id: int = game_state.get_entity_assigned_construction_site_id(entity)
+	if structure_id != 0:
+		var structure_entity: Dictionary = game_state.get_entity_dict(structure_id)
+		var structure_type: String = game_state.get_entity_structure_type(structure_entity)
+		var structure_name: String = GameDefinitionsClass.get_building_display_name(structure_type)
+		return "%s %s #%d" % [task, structure_name.to_lower(), structure_id]
+
+	return task
+
+
+func _format_rally_summary(game_state: GameState, producer_entity: Dictionary) -> String:
+	var rally_mode: String = game_state.get_entity_rally_mode(producer_entity)
+	if rally_mode == "":
+		return "none"
+	if rally_mode == "cell":
+		var rally_cell: Vector2i = game_state.get_entity_rally_cell(producer_entity)
+		return "(%d,%d)" % [rally_cell.x, rally_cell.y]
+	if rally_mode == "resource":
+		var resource_id: int = game_state.get_entity_rally_target_id(producer_entity)
+		if resource_id != 0 and game_state.entities.has(resource_id):
+			var resource_entity: Dictionary = game_state.get_entity_dict(resource_id)
+			return "%s #%d" % [
+				game_state.get_entity_resource_type(resource_entity),
+				resource_id,
+			]
+		return "resource"
+	return rally_mode
 
 
 func _on_action_button_pressed(index: int) -> void:

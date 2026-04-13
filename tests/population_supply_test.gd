@@ -19,6 +19,7 @@ func _init() -> void:
 	var failures: Array[String] = []
 	failures.append_array(run_population_cap_gate_test())
 	failures.append_array(run_house_supply_increase_test())
+	failures.append_array(run_reserved_population_queue_test())
 	if failures.is_empty():
 		print("POPULATION_SUPPLY_TEST: PASS")
 	else:
@@ -81,6 +82,36 @@ func run_house_supply_increase_test() -> Array[String]:
 	return failures
 
 
+func run_reserved_population_queue_test() -> Array[String]:
+	var failures: Array[String] = []
+	var game_state: GameState = _create_population_test_state_with_worker_count(4)
+	var tick_manager: TickManager = _make_tick_manager(game_state)
+	var stockpile_id: int = 1
+
+	if game_state.get_population_used(1) != 4:
+		failures.append("[reserved] Expected 4 living population, got %d." % game_state.get_population_used(1))
+
+	tick_manager.queue_command(QueueProductionCommandClass.new(0, 1, 0, stockpile_id, "worker"))
+	tick_manager.advance_one_tick()
+
+	var stockpile_entity: Dictionary = game_state.get_entity_dict(stockpile_id)
+	if game_state.get_entity_production_queue_count(stockpile_entity) != 1:
+		failures.append("[reserved] First queued worker did not enter production queue.")
+	if game_state.get_population_reserved(1) != 5:
+		failures.append("[reserved] Expected reserved population 5 after first queue, got %d." % game_state.get_population_reserved(1))
+	if game_state.get_population_queued(1) != 1:
+		failures.append("[reserved] Expected queued population 1, got %d." % game_state.get_population_queued(1))
+
+	tick_manager.queue_command(QueueProductionCommandClass.new(1, 1, 1, stockpile_id, "worker"))
+	tick_manager.advance_one_tick()
+
+	stockpile_entity = game_state.get_entity_dict(stockpile_id)
+	if game_state.get_entity_production_queue_count(stockpile_entity) != 1:
+		failures.append("[reserved] Second queued worker should be rejected at reserved cap.")
+
+	return failures
+
+
 func _make_tick_manager(game_state: GameState) -> TickManager:
 	var command_buffer: CommandBuffer = CommandBufferClass.new()
 	var replay_log: ReplayLog = ReplayLogClass.new()
@@ -97,6 +128,10 @@ func _make_tick_manager(game_state: GameState) -> TickManager:
 
 
 func _create_population_test_state() -> GameState:
+	return _create_population_test_state_with_worker_count(5)
+
+
+func _create_population_test_state_with_worker_count(worker_count: int) -> GameState:
 	var state: GameState = GameStateClass.new()
 	state.resources = {"wood": 200, "stone": 0}
 	state.map_data = {"width": 12, "height": 12, "cell_size": 64, "blocked_cells": {}}
@@ -123,7 +158,11 @@ func _create_population_test_state() -> GameState:
 		Vector2i(4, 2),
 		Vector2i(4, 3),
 	]
-	for worker_cell in worker_cells:
+	for i in range(mini(worker_count, worker_cells.size())):
+		var worker_cell_value: Variant = worker_cells[i]
+		if not (worker_cell_value is Vector2i):
+			continue
+		var worker_cell: Vector2i = worker_cell_value
 		var worker_id: int = state.allocate_entity_id()
 		state.entities[worker_id] = {
 			"id": worker_id,

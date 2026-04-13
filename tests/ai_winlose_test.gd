@@ -21,6 +21,7 @@ func _init() -> void:
 	var failures: Array[String] = []
 	failures.append_array(run_enemy_ai_pacing_test())
 	failures.append_array(run_enemy_ai_production_and_attack_test())
+	failures.append_array(run_enemy_ai_uses_generic_combat_producer_test())
 	failures.append_array(run_win_condition_test())
 	failures.append_array(run_lose_condition_test())
 	if failures.is_empty():
@@ -97,6 +98,36 @@ func run_enemy_ai_production_and_attack_test() -> Array[String]:
 	return failures
 
 
+func run_enemy_ai_uses_generic_combat_producer_test() -> Array[String]:
+	var failures: Array[String] = []
+	var game_state: GameState = _create_ai_test_state("archery_range")
+	var tick_manager: TickManager = _make_tick_manager(game_state, true)
+
+	for _i in range(EnemyAIControllerClass.PRODUCTION_START_TICK + 2):
+		tick_manager.advance_one_tick()
+
+	var produced_archer_id: int = 0
+	for _i in range(EnemyAIControllerClass.PRODUCTION_INTERVAL_TICKS + 30):
+		tick_manager.advance_one_tick()
+		produced_archer_id = _find_enemy_unit_by_role(game_state, "archer")
+		if produced_archer_id != 0:
+			break
+
+	if produced_archer_id == 0:
+		failures.append("[ai_generic] Enemy AI did not use archery_range to produce an archer.")
+		return failures
+
+	if game_state.current_tick < EnemyAIControllerClass.ATTACK_START_TICK:
+		for _i in range(EnemyAIControllerClass.ATTACK_START_TICK - game_state.current_tick + 2):
+			tick_manager.advance_one_tick()
+
+	var archer_entity: Dictionary = game_state.get_entity_dict(produced_archer_id)
+	if game_state.get_entity_attack_target_id(archer_entity) == 0:
+		failures.append("[ai_generic] Enemy-produced archer did not receive an attack command.")
+
+	return failures
+
+
 func run_win_condition_test() -> Array[String]:
 	var failures: Array[String] = []
 	var game_state: GameState = _create_winlose_test_state()
@@ -157,7 +188,7 @@ func _make_tick_manager(game_state: GameState, include_ai: bool) -> TickManager:
 	return TickManagerClass.new(game_state, command_buffer, replay_log, state_hasher, systems, controllers)
 
 
-func _create_ai_test_state() -> GameState:
+func _create_ai_test_state(enemy_producer_type: String = "barracks") -> GameState:
 	var state: GameState = GameStateClass.new()
 	state.resources = {"wood": 0, "stone": 0}
 	state.map_data = {"width": 12, "height": 12, "cell_size": 64, "blocked_cells": {}}
@@ -201,7 +232,7 @@ func _create_ai_test_state() -> GameState:
 	state.entities[enemy_barracks_id] = {
 		"id": enemy_barracks_id,
 		"entity_type": "structure",
-		"structure_type": "barracks",
+		"structure_type": enemy_producer_type,
 		"owner_id": 2,
 		"grid_position": Vector2i(9, 10),
 		"is_constructed": true,
@@ -293,10 +324,14 @@ func _find_enemy_barracks_id(game_state: GameState) -> int:
 
 
 func _find_enemy_soldier_id(game_state: GameState) -> int:
+	return _find_enemy_unit_by_role(game_state, "soldier")
+
+
+func _find_enemy_unit_by_role(game_state: GameState, unit_role: String) -> int:
 	for unit_id in game_state.get_entities_by_type("unit"):
 		var unit_entity: Dictionary = game_state.get_entity_dict(unit_id)
 		if game_state.get_entity_owner_id(unit_entity) != 2:
 			continue
-		if game_state.get_entity_unit_role(unit_entity) == "soldier":
+		if game_state.get_entity_unit_role(unit_entity) == unit_role:
 			return unit_id
 	return 0

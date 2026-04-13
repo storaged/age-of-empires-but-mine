@@ -4,7 +4,9 @@ extends SimulationSystem
 const AssignConstructionCommandClass = preload("res://commands/assign_construction_command.gd")
 const BuildStructureCommandClass = preload("res://commands/build_structure_command.gd")
 const DeterministicPathfinderClass = preload("res://simulation/deterministic_pathfinder.gd")
+const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const QueueProductionCommandClass = preload("res://commands/queue_production_command.gd")
+const SetRallyPointCommandClass = preload("res://commands/set_rally_point_command.gd")
 
 
 func apply(game_state: GameState, commands_for_tick: Array[SimulationCommand], _tick: int) -> void:
@@ -17,6 +19,9 @@ func apply(game_state: GameState, commands_for_tick: Array[SimulationCommand], _
 			continue
 		if command.command_type == "queue_production":
 			_apply_queue_production_command(game_state, command)
+			continue
+		if command.command_type == "set_rally_point":
+			_apply_set_rally_point_command(game_state, command)
 
 
 func _apply_build_structure_command(game_state: GameState, command: SimulationCommand) -> void:
@@ -45,17 +50,14 @@ func _apply_build_structure_command(game_state: GameState, command: SimulationCo
 
 	var structure_id: int = game_state.allocate_entity_id()
 	var owner_id: int = game_state.get_entity_owner_id(builder_entity, 1)
-	var structure_entity: Dictionary = {
-		"id": structure_id,
-		"entity_type": "structure",
-		"structure_type": build_command.structure_type,
-		"owner_id": owner_id,
-		"grid_position": build_command.target_cell,
-		"is_constructed": false,
-		"construction_progress_ticks": 0,
-		"construction_duration_ticks": build_duration,
-		"assigned_builder_id": build_command.builder_unit_id,
-	}
+	var structure_entity: Dictionary = GameDefinitionsClass.create_structure_entity(
+		build_command.structure_type,
+		structure_id,
+		owner_id,
+		build_command.target_cell,
+		false,
+		build_command.builder_unit_id
+	)
 	game_state.entities[structure_id] = structure_entity
 	game_state.deduct_building_cost(build_command.structure_type)
 
@@ -88,6 +90,7 @@ func _apply_build_structure_command(game_state: GameState, command: SimulationCo
 	builder_entity["move_target"] = slot_cell
 	builder_entity["interaction_slot_cell"] = slot_cell
 	game_state.entities[build_command.builder_unit_id] = builder_entity
+	game_state.mark_static_blocker(build_command.target_cell)
 
 
 func _apply_assign_construction_command(game_state: GameState, command: SimulationCommand) -> void:
@@ -171,6 +174,10 @@ func _apply_queue_production_command(game_state: GameState, command: SimulationC
 		return
 	if producer_type == "structure" and not game_state.get_entity_is_constructed(producer_entity):
 		return
+	var structure_type: String = game_state.get_entity_structure_type(producer_entity)
+	var expected_unit_type: String = GameDefinitionsClass.get_structure_produces(structure_type)
+	if expected_unit_type == "" or expected_unit_type != production_command.produced_unit_type:
+		return
 
 	var production_duration: int = game_state.get_production_duration(production_command.produced_unit_type)
 	if production_duration <= 0:
@@ -194,3 +201,50 @@ func _apply_queue_production_command(game_state: GameState, command: SimulationC
 		producer_entity["production_progress_ticks"] = 0
 	producer_entity["production_blocked"] = false
 	game_state.entities[production_command.producer_entity_id] = producer_entity
+
+
+func _apply_set_rally_point_command(game_state: GameState, command: SimulationCommand) -> void:
+	if not (command is SetRallyPointCommandClass):
+		return
+
+	var rally_command: SetRallyPointCommandClass = command
+	if not game_state.entities.has(rally_command.producer_entity_id):
+		return
+
+	var producer_entity: Dictionary = game_state.get_entity_dict(rally_command.producer_entity_id)
+	var producer_type: String = game_state.get_entity_type(producer_entity)
+	if producer_type != "stockpile" and producer_type != "structure":
+		return
+	if producer_type == "structure" and not game_state.get_entity_is_constructed(producer_entity):
+		return
+
+	var structure_type: String = game_state.get_entity_structure_type(producer_entity)
+	var produced_unit_type: String = GameDefinitionsClass.get_structure_produces(structure_type)
+	if produced_unit_type == "":
+		return
+
+	if rally_command.rally_mode == "cell":
+		if not game_state.is_cell_walkable(rally_command.rally_cell):
+			return
+		producer_entity["rally_mode"] = "cell"
+		producer_entity["rally_cell"] = rally_command.rally_cell
+		producer_entity["rally_target_id"] = 0
+		game_state.entities[rally_command.producer_entity_id] = producer_entity
+		return
+
+	if rally_command.rally_mode == "resource":
+		if GameDefinitionsClass.get_unit_role(produced_unit_type) != "worker":
+			return
+		if not game_state.entities.has(rally_command.rally_target_id):
+			return
+		var resource_entity: Dictionary = game_state.get_entity_dict(rally_command.rally_target_id)
+		if game_state.get_entity_type(resource_entity) != "resource_node":
+			return
+		if not game_state.get_entity_is_gatherable(resource_entity):
+			return
+		if game_state.get_entity_is_depleted(resource_entity):
+			return
+		producer_entity["rally_mode"] = "resource"
+		producer_entity["rally_cell"] = game_state.get_entity_grid_position(resource_entity)
+		producer_entity["rally_target_id"] = rally_command.rally_target_id
+		game_state.entities[rally_command.producer_entity_id] = producer_entity

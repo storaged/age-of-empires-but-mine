@@ -1,11 +1,14 @@
 class_name MovementSystem
 extends SimulationSystem
 
+const DeterministicPathfinderClass = preload("res://simulation/deterministic_pathfinder.gd")
+
 ## Deterministic grid-backed unit movement with simple local traffic resolution.
 ## Resolution order:
 ## 1. Build one-cell move intents in stable priority order.
 ## 2. Resolve direct two-unit swaps deterministically.
 ## 3. Run repeated movement passes so vacated cells can be entered in the same tick.
+## 4. After bounded waiting, recompute a path to the same authoritative target.
 
 const TRAFFIC_PRIORITY_BY_TASK: Dictionary = {
 	"depositing": 0,
@@ -14,8 +17,11 @@ const TRAFFIC_PRIORITY_BY_TASK: Dictionary = {
 	"to_resource": 3,
 	"to_construction": 3,
 	"to_target": 3,
+	"attack_moving": 3,
+	"to_rally": 4,
 	"idle": 4,
 }
+const REPATH_AFTER_WAIT_TICKS: int = 3
 
 
 func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], _tick: int) -> void:
@@ -31,6 +37,7 @@ func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], 
 		entity["traffic_state"] = ""
 
 		if not game_state.get_entity_has_move_target(entity):
+			entity["movement_wait_ticks"] = 0
 			game_state.entities[entity_id] = entity
 			continue
 
@@ -40,6 +47,7 @@ func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], 
 			entity["has_move_target"] = false
 			entity["move_target"] = current_cell
 			entity["traffic_state"] = "arrived"
+			entity["movement_wait_ticks"] = 0
 			game_state.entities[entity_id] = entity
 			continue
 
@@ -99,8 +107,7 @@ func apply(game_state: GameState, _commands_for_tick: Array[SimulationCommand], 
 		var wait_reason: String = _build_wait_reason(game_state, intent, start_occupancy)
 		var waiting_entity: Dictionary = game_state.get_entity_dict(entity_id)
 		waiting_entity["traffic_state"] = wait_reason
-		if wait_reason == "waiting":
-			_maybe_clear_path_for_idle_blocker(game_state, intent, start_occupancy, waiting_entity)
+		_maybe_recompute_path(game_state, waiting_entity, wait_reason)
 		game_state.entities[entity_id] = waiting_entity
 
 	game_state.occupancy = reserved_cells
@@ -171,33 +178,47 @@ func _apply_step(game_state: GameState, entity_id: int, next_cell: Vector2i, tra
 	entity["path_cells"] = path_cells
 	entity["has_move_target"] = not path_cells.is_empty()
 	entity["traffic_state"] = traffic_state
+	entity["movement_wait_ticks"] = 0
 	if path_cells.is_empty():
 		entity["move_target"] = next_cell
 	game_state.entities[entity_id] = entity
 
 
-## If the cell blocking this unit is occupied by an idle unit (no move target),
-## clear the waiting unit's path so the economy/combat system re-plans next tick
-## with avoid_occupied=true, finding an alternative route if one exists.
-func _maybe_clear_path_for_idle_blocker(
+func _maybe_recompute_path(
 	game_state: GameState,
-	intent: Dictionary,
-	start_occupancy: Dictionary,
-	waiting_entity: Dictionary
+	entity: Dictionary,
+	wait_reason: String
 ) -> void:
-	var next_cell: Vector2i = _get_intent_cell(intent, "next_cell")
-	var next_key: String = game_state.cell_key(next_cell)
-	if not start_occupancy.has(next_key):
+	if wait_reason != "waiting" and wait_reason != "yielding":
+		entity["movement_wait_ticks"] = 0
 		return
-	var blocker_value: Variant = start_occupancy[next_key]
-	if not (blocker_value is int):
+	if not game_state.get_entity_has_move_target(entity):
+		entity["movement_wait_ticks"] = 0
 		return
-	var blocker_entity: Dictionary = game_state.get_entity_dict(blocker_value)
-	if game_state.get_entity_has_move_target(blocker_entity):
+
+	var current_cell: Vector2i = game_state.get_entity_grid_position(entity)
+	var target_cell: Vector2i = game_state.get_entity_move_target(entity, current_cell)
+	if current_cell == target_cell:
+		entity["movement_wait_ticks"] = 0
 		return
-	# Blocker is genuinely idle — clear path to force re-plan next tick.
-	waiting_entity["path_cells"] = []
-	waiting_entity["has_move_target"] = false
+
+	var wait_ticks: int = game_state.get_entity_movement_wait_ticks(entity) + 1
+	entity["movement_wait_ticks"] = wait_ticks
+	if wait_ticks < REPATH_AFTER_WAIT_TICKS:
+		return
+
+	var path_cells: Array[Vector2i] = DeterministicPathfinderClass.find_path(
+		game_state, current_cell, target_cell, true
+	)
+	if path_cells.is_empty():
+		path_cells = DeterministicPathfinderClass.find_path(game_state, current_cell, target_cell, false)
+	if path_cells.is_empty():
+		return
+
+	entity["path_cells"] = path_cells
+	entity["has_move_target"] = true
+	entity["movement_wait_ticks"] = 0
+	entity["traffic_state"] = "repathing"
 
 
 func _build_wait_reason(game_state: GameState, intent: Dictionary, start_occupancy: Dictionary) -> String:

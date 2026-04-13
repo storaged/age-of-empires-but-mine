@@ -2,13 +2,14 @@ class_name EnemyAIController
 extends RefCounted
 
 const AttackCommandClass = preload("res://commands/attack_command.gd")
+const GameDefinitionsClass = preload("res://simulation/game_definitions.gd")
 const QueueProductionCommandClass = preload("res://commands/queue_production_command.gd")
 
-const PRODUCTION_START_TICK: int = 120
-const PRODUCTION_INTERVAL_TICKS: int = 45
-const ATTACK_START_TICK: int = 260
-const ATTACK_WAVE_INTERVAL_TICKS: int = 90
-const MIN_ATTACKERS_PER_WAVE: int = 2
+const PRODUCTION_START_TICK: int = 180
+const PRODUCTION_INTERVAL_TICKS: int = 55
+const ATTACK_START_TICK: int = 420
+const ATTACK_WAVE_INTERVAL_TICKS: int = 120
+const MIN_ATTACKERS_PER_WAVE: int = 3
 
 var issuer_id: int = 2
 var controlled_owner_id: int = 2
@@ -50,9 +51,13 @@ func _build_production_commands(game_state: GameState, scheduled_tick: int) -> A
 			continue
 		if not game_state.get_entity_is_constructed(structure_entity):
 			continue
-		if game_state.get_entity_structure_type(structure_entity) != "barracks":
-			continue
 		if game_state.get_entity_production_queue_count(structure_entity) > 0:
+			continue
+		var structure_type: String = game_state.get_entity_structure_type(structure_entity)
+		var produced_unit_type: String = GameDefinitionsClass.get_structure_produces(structure_type)
+		if produced_unit_type == "":
+			continue
+		if not GameDefinitionsClass.unit_type_can_attack(produced_unit_type):
 			continue
 
 		commands.append(
@@ -61,7 +66,7 @@ func _build_production_commands(game_state: GameState, scheduled_tick: int) -> A
 				issuer_id,
 				_next_sequence_number(),
 				structure_id,
-				"soldier"
+				produced_unit_type
 			)
 		)
 		break
