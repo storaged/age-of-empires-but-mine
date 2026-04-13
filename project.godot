@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Age Of Empires But Mine"
-run/main_scene="res://scenes/prototype_gameplay.tscn"
+run/main_scene="res://scenes/pregame.tscn"
 config/features=PackedStringArray("4.6")
 
 [rendering]
